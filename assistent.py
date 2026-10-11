@@ -2221,8 +2221,18 @@ def _ax_punkt_und_groesse(element):
     return werte[0], werte[1]
 
 
+def _knopfform(hoehe: float, breite: float, gefuellt: float) -> bool:
+    """Kreis (ältere Anzeigen) oder abgerundeter Balken (macOS 26: grün „Annehmen“ über rot „Ablehnen“, oben
+    rechts im Anruffenster). Maße in Punkten, gefuellt = Anteil der Fläche an ihrem Rechteck."""
+    kreis = 16 <= max(hoehe, breite) <= 60 and abs(hoehe - breite) <= 0.25 * max(hoehe, breite) \
+        and 0.45 <= gefuellt <= 0.86
+    balken = 14 <= hoehe <= 40 and 30 <= breite <= 110 and 1.5 <= breite / hoehe <= 4.5 and 0.6 <= gefuellt <= 0.97
+    return kreis or balken
+
+
 def farbknoepfe(bild, farbe: str, skala: float) -> list:
-    """Runde, einfarbige Flächen in Knopfgröße (16 bis 60 Punkte) als [(x, y)] in Bildpunkten des Ausschnitts."""
+    """Einfarbige Knopfflächen (Kreis oder Balken) in der rechten Bildhälfte als [(x, y)] in Punkten des
+    Ausschnitts."""
     import numpy as np
     from scipy import ndimage
 
@@ -2235,14 +2245,12 @@ def farbknoepfe(bild, farbe: str, skala: float) -> list:
     knoepfe = []
     for nummer, (zeilen, spalten) in enumerate(ndimage.find_objects(flaechen), 1):
         hoehe, breite = zeilen.stop - zeilen.start, spalten.stop - spalten.start
-        groesse = max(hoehe, breite) / skala
-        quadratisch = abs(hoehe - breite) <= 0.25 * max(hoehe, breite)
         # Ein Kreis füllt sein Rechteck zu etwa 79 %, mit weißem Telefonsymbol darin weniger; ein abgerundetes
-        # Quadrat wie das grüne FaceTime-Symbol links füllt es fast ganz
+        # Quadrat wie das grüne FaceTime-Symbol fast ganz und fällt deshalb heraus
         gefuellt = (flaechen[zeilen, spalten] == nummer).sum() / (hoehe * breite)
         mitte_x = (spalten.start + spalten.stop) / 2
-        rechts = mitte_x > 0.5 * bild.shape[1]  # Anruf-Knöpfe sitzen rechts, das App-Symbol links
-        if 16 <= groesse <= 60 and quadratisch and 0.45 <= gefuellt <= 0.86 and rechts:
+        rechts = mitte_x > 0.5 * bild.shape[1]  # Anruf-Knöpfe sitzen rechts, App-Symbol und Name links
+        if rechts and _knopfform(hoehe / skala, breite / skala, gefuellt):
             knoepfe.append((mitte_x / skala, (zeilen.start + zeilen.stop) / 2 / skala))
     return knoepfe
 
