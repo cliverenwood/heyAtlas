@@ -10,3 +10,4 @@ pyobjc-framework-ServiceManagement
 pyobjc-framework-AVFoundation
 pyobjc-framework-ApplicationServices
 pyobjc-framework-Contacts
+pillow

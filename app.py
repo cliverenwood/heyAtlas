@@ -100,11 +100,13 @@ OPTIONALE_FUNKTIONEN = {
     "Anrufe annehmen": (
         "ANRUFE_ANNEHMEN", EINSTELLUNGSSEITE + "Privacy_Accessibility",
         "Atlas sagt dann eingehende FaceTime- und iPhone-Anrufe an; mit „Hey Atlas, nimm an“ oder „… lehn ab“ "
-        "nimmt er sie an oder lehnt sie ab. Dafür braucht heyAtlas „Bedienungshilfen“, damit darf es andere Apps "
-        "bedienen. macOS fragt gleich danach.\n\nFür iPhone-Anrufe: iPhone → Telefon → Auf anderen Geräten und "
-        "Mac → FaceTime → Anrufe vom iPhone einschalten.",
-        "Atlas nimmt dann keine Anrufe mehr an. Entziehe heyAtlas bitte auch die Bedienungshilfen in den "
-        "Systemeinstellungen, die sich gleich öffnen."),
+        "nimmt er sie an oder lehnt sie ab. Dafür braucht heyAtlas zwei Berechtigungen: „Bedienungshilfen“ (andere "
+        "Apps bedienen, klicken) und „Bildschirm- und Systemaudioaufnahme“ (Atlas fotografiert nur den Bereich der "
+        "Anruf-Mitteilung, um den grünen bzw. roten Knopf zu finden). macOS fragt gleich danach; nach dem Erlauben "
+        "der Bildschirmaufnahme heyAtlas einmal neu starten.\n\nFür iPhone-Anrufe: iPhone → Telefon → Auf "
+        "anderen Geräten und Mac → FaceTime → Anrufe vom iPhone einschalten.",
+        "Atlas nimmt dann keine Anrufe mehr an. Entziehe heyAtlas bitte auch Bedienungshilfen und Bildschirmaufnahme "
+        "in den Systemeinstellungen, die sich gleich öffnen."),
 }
 
 
@@ -339,7 +341,8 @@ class AtlasApp(rumps.App):
         werte[name] = einschalten
         atlas.einstellungen_speichern(werte)
         if einschalten and name == "ANRUFE_ANNEHMEN":
-            atlas.bedienungshilfen_erlaubt(nachfragen=True)  # macOS zeigt eigenen Dialog mit Link
+            atlas.bedienungshilfen_erlaubt(nachfragen=True)  # macOS zeigt eigene Dialoge mit Link
+            atlas.bildschirmaufnahme_erlauben()
         else:
             subprocess.run(["/usr/bin/open", seite])  # Berechtigung erteilen bzw. wieder entziehen
         self.neustarten()

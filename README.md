@@ -177,9 +177,14 @@ Optional und standardmäßig aus: Schalter „Anrufe annehmen“ im Einstellungs
 „… lehn ab“; Atlas sagt vorher an, wer anruft. Gilt für FaceTime-Anrufe und für iPhone-Anrufe, die auf dem Mac
 klingeln. Während eines Gesprächs hört Atlas nicht auf das Aktivierungswort.
 
-- Atlas drückt dafür den Knopf in der Anrufanzeige von macOS und braucht **Bedienungshilfen**
-  (Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen → heyAtlas). Diese Berechtigung erlaubt,
-  andere Apps zu bedienen; sie wird nur bei eingeschaltetem Schalter benötigt.
+- Unter macOS 26 ist die Anruf-Mitteilung für die Bedienungshilfen leer, und Apples Anrufdienst lässt
+  Drittanbieter nicht zu. Atlas fotografiert deshalb **nur den Bereich der Mitteilung**, sucht darin den grünen
+  (Annehmen) bzw. roten (Ablehnen) runden Knopf in der rechten Hälfte und klickt ihn an. Geklickt wird nur bei genau
+  einem eindeutigen Treffer; das letzte Bild liegt zur Fehlersuche in
+  `~/Library/Application Support/heyAtlas/letzte-anruf-mitteilung.png`.
+- Dafür braucht heyAtlas **Bedienungshilfen** und **Bildschirm- und Systemaudioaufnahme** (Systemeinstellungen →
+  Datenschutz & Sicherheit). Beide nur bei eingeschaltetem Schalter. Nach dem Erlauben der Bildschirmaufnahme
+  heyAtlas neu starten.
 - **Für iPhone-Anrufe auf dem Mac** müssen eingeschaltet sein:
   - iPhone → Einstellungen → Apps → Telefon → **Auf anderen Geräten** → diesen Mac erlauben
   - Mac → FaceTime → Einstellungen → **Anrufe vom iPhone**

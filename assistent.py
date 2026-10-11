@@ -2083,6 +2083,7 @@ def berechtigungen_einrichten() -> list:
     if ANRUFE_ANNEHMEN:
         schritte.append(("Bedienungshilfen (Anrufe)",
                          lambda: "erlaubt" if bedienungshilfen_erlaubt(nachfragen=True) else "abgelehnt"))
+        schritte.append(("Bildschirmaufnahme (Anrufe)", bildschirmaufnahme_erlauben))
     ergebnisse = []
     for nummer, (bereich, abfrage) in enumerate(schritte, 1):
         melde_status(f"Berechtigungen {nummer}/{len(schritte)}: {bereich}")
@@ -2200,6 +2201,92 @@ def _anruf_fenster() -> list:
     return ergebnis
 
 
+# ---- Annehmen per Bild: Die Anruf-Mitteilung ist für die Bedienungshilfen leer (Inhalt aus einem anderen Prozess).
+# Atlas fotografiert deshalb nur ihren Bereich, sucht den grünen (Annehmen) bzw. roten (Ablehnen) runden Knopf und
+# klickt genau dort. Geklickt wird nur bei genau einem eindeutigen Treffer innerhalb der Mitteilung.
+KNOPFFARBE = {ANNEHMEN: "grün", ABLEHNEN: "rot"}
+LETZTES_ANRUFBILD = os.path.join(DATENORDNER, "letzte-anruf-mitteilung.png")
+
+
+def _ax_punkt_und_groesse(element):
+    """Position und Größe eines Elements in Bildschirmpunkten (Ursprung oben links), oder (None, None)."""
+    import ApplicationServices
+
+    werte = []
+    for attribut, typ in ((ApplicationServices.kAXPositionAttribute, ApplicationServices.kAXValueCGPointType),
+                          (ApplicationServices.kAXSizeAttribute, ApplicationServices.kAXValueCGSizeType)):
+        roh = _ax(element, attribut)
+        ok, wert = ApplicationServices.AXValueGetValue(roh, typ, None) if roh is not None else (False, None)
+        werte.append(wert if ok else None)
+    return werte[0], werte[1]
+
+
+def farbknoepfe(bild, farbe: str, skala: float) -> list:
+    """Runde, einfarbige Flächen in Knopfgröße (16 bis 60 Punkte) als [(x, y)] in Bildpunkten des Ausschnitts."""
+    import numpy as np
+    from scipy import ndimage
+
+    r, g, b = (bild[..., i].astype(np.int16) for i in range(3))
+    # Grün: Annehmen, Rot: Ablehnen; deutlich gesättigte Farben, damit Grau- und Hauttöne nicht zählen
+    gruen = (g > 140) & (g - r > 60) & (g - b > 50)
+    rot = (r > 170) & (r - g > 80) & (r - b > 80)
+    maske = gruen if farbe == "grün" else rot
+    flaechen, anzahl = ndimage.label(maske)
+    knoepfe = []
+    for nummer, (zeilen, spalten) in enumerate(ndimage.find_objects(flaechen), 1):
+        hoehe, breite = zeilen.stop - zeilen.start, spalten.stop - spalten.start
+        groesse = max(hoehe, breite) / skala
+        quadratisch = abs(hoehe - breite) <= 0.25 * max(hoehe, breite)
+        # Ein Kreis füllt sein Rechteck zu etwa 79 %, mit weißem Telefonsymbol darin weniger; ein abgerundetes
+        # Quadrat wie das grüne FaceTime-Symbol links füllt es fast ganz
+        gefuellt = (flaechen[zeilen, spalten] == nummer).sum() / (hoehe * breite)
+        mitte_x = (spalten.start + spalten.stop) / 2
+        rechts = mitte_x > 0.5 * bild.shape[1]  # Anruf-Knöpfe sitzen rechts, das App-Symbol links
+        if 16 <= groesse <= 60 and quadratisch and 0.45 <= gefuellt <= 0.86 and rechts:
+            knoepfe.append((mitte_x / skala, (zeilen.start + zeilen.stop) / 2 / skala))
+    return knoepfe
+
+
+def _maus(art, x: float, y: float) -> None:
+    import Quartz
+
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap,
+                       Quartz.CGEventCreateMouseEvent(None, art, (x, y), Quartz.kCGMouseButtonLeft))
+
+
+def knopf_per_bild(mitteilung, farbe: str) -> bool:
+    """Fotografiert die Mitteilung, sucht genau einen Knopf der Farbe und klickt ihn. True bei Klick."""
+    import numpy as np
+    import Quartz
+    from PIL import Image
+
+    punkt, groesse = _ax_punkt_und_groesse(mitteilung)
+    if punkt is None or groesse is None or not Quartz.CGPreflightScreenCaptureAccess():
+        print(f"Anruf per Bild: Position {punkt}, Bildschirmaufnahme erlaubt {Quartz.CGPreflightScreenCaptureAccess()}")
+        return False
+    vorher = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+    # Mauszeiger auf die Mitteilung: manche zeigen ihre Knöpfe erst beim Darüberfahren
+    _maus(Quartz.kCGEventMouseMoved, punkt.x + groesse.width / 2, punkt.y + groesse.height / 2)
+    time.sleep(0.4)
+    os.makedirs(DATENORDNER, exist_ok=True)
+    bereich = f"{int(punkt.x)},{int(punkt.y)},{int(groesse.width)},{int(groesse.height)}"
+    subprocess.run(["/usr/sbin/screencapture", "-x", "-t", "png", "-R", bereich, LETZTES_ANRUFBILD], check=True)
+    bild = np.array(Image.open(LETZTES_ANRUFBILD).convert("RGB"))
+    skala = bild.shape[1] / groesse.width
+    knoepfe = farbknoepfe(bild, farbe, skala)
+    print(f"Anruf per Bild: Bereich {bereich}, Skala {skala:.1f}, {farbe}e Knöpfe {knoepfe}")
+    if len(knoepfe) != 1:  # kein oder mehrdeutiger Treffer: lieber nicht klicken
+        _maus(Quartz.kCGEventMouseMoved, vorher.x, vorher.y)
+        return False
+    x, y = punkt.x + knoepfe[0][0], punkt.y + knoepfe[0][1]
+    for art in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+        _maus(art, x, y)
+        time.sleep(0.05)
+    _maus(Quartz.kCGEventMouseMoved, vorher.x, vorher.y)
+    print(f"Anruf per Bild: {farbe}en Knopf bei ({x:.0f}, {y:.0f}) angeklickt")
+    return True
+
+
 def _knopf_suchen_und_druecken(beschriftungen: tuple) -> str:
     import ApplicationServices
 
@@ -2220,6 +2307,10 @@ def anruf_knopf_druecken(beschriftungen: tuple) -> str:
     gedrueckt = _knopf_suchen_und_druecken(beschriftungen)
     if gedrueckt:
         return gedrueckt
+    for _, _, _, mitteilungen in _anruf_fenster():
+        for mitteilung in mitteilungen:
+            if beschriftungen in KNOPFFARBE and knopf_per_bild(mitteilung, KNOPFFARBE[beschriftungen]):
+                return beschriftungen[0]
     for _, _, _, mitteilungen in _anruf_fenster():
         for mitteilung in mitteilungen:
             fehler, aktionen = ApplicationServices.AXUIElementCopyActionNames(mitteilung, None)
@@ -2376,6 +2467,19 @@ def anruf_ablehnen() -> Optional[str]:
     if anruf_knopf_druecken(ABLEHNEN):
         return "Abgelehnt."
     return "Per Sprache kann ich den Anruf leider nicht ablehnen. Klick bitte auf Ablehnen."
+
+
+def bildschirmaufnahme_erlauben() -> str:
+    """Fragt nach der Bildschirmaufnahme (nötig, um den Annehmen-Knopf im Bild der Mitteilung zu finden).
+    macOS übernimmt eine neu erteilte Freigabe erst nach einem Neustart von heyAtlas."""
+    import Quartz
+
+    if Quartz.CGPreflightScreenCaptureAccess():
+        return "erlaubt"
+    Quartz.CGRequestScreenCaptureAccess()
+    if Quartz.CGPreflightScreenCaptureAccess():
+        return "erlaubt"
+    return "abgelehnt (nach dem Erlauben heyAtlas neu starten)"
 
 
 def bedienungshilfen_erlaubt(nachfragen: bool = False) -> bool:
