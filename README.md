@@ -107,3 +107,22 @@ security add-generic-password -s youtube-api-key -a "$USER" -w
 
 Zum Steuern (Pause, vor, zurück) in Safari einmalig: Einstellungen → Erweitert → „Funktionen für Webentwickler zeigen“,
 dann Menü Entwickler → „JavaScript von Apple Events erlauben“.
+
+## Schnellbefehle ohne Claude
+
+Kurze Befehle erledigt Atlas sofort selbst, ohne Anfrage an Claude (unter 1 ms statt 2–4 s). Sie greifen nur, wenn der
+ganze Satz passt; alles andere geht an Claude.
+
+- „Stopp“: schaltet Wecker/Timer aus, sonst pausiert es die Musik
+- „Lauter“, „Leiser“, „Ton aus“, „Ton an“
+- „Pause“, „Spiel weiter“, „Nächstes Lied“, „Vorheriges Lied“, „Was läuft gerade?“ (Spotify oder Musik, nur wenn sie spielt)
+- „Wie spät ist es?“
+- „Timer auf 10 Minuten (für die Nudeln)“, „Wie lange noch?“, „Timer abbrechen“
+
+Die Sätze stehen in `SCHNELL_TEXTE` in `assistent.py` und lassen sich dort ergänzen.
+
+## Codequalität
+
+```sh
+uvx ruff check .       # Konfiguration in ruff.toml, Ziel Python 3.9
+```

@@ -18,7 +18,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
-from typing import List, Literal, Optional
+from typing import Literal, Optional
 
 import anthropic
 from anthropic import beta_tool
@@ -56,8 +56,8 @@ gerundet und ohne Nachkommastellen. Für Licht, Heizung und andere Abläufe nutz
 kurzbefehle_auflisten nach, welche es gibt. Für Timer und Wecker nutze die Timer- und Wecker-Werkzeuge. Sprich Uhrzeiten
 natürlich aus, etwa "um halb drei" oder "um 14 Uhr".
 Musik spielst du über Spotify, außer der Nutzer nennt ausdrücklich Apple Music. Für aktuelle Fakten, die kein anderes
-Werkzeug liefert, nutze die Websuche; nenne danach nur das Wichtigste in ein bis zwei Sätzen, ohne Quellen. Mails und Nachrichten verschickst du nur, wenn der Nutzer es ausdrücklich will;
-sonst legst du einen Entwurf an.
+Werkzeug liefert, nutze die Websuche; nenne danach nur das Wichtigste in ein bis zwei Sätzen, ohne Quellen.
+Mails und Nachrichten verschickst du nur, wenn der Nutzer es ausdrücklich will; sonst legst du einen Entwurf an.
 Sagt der Nutzer "Guten Morgen" oder bittet um ein Briefing, hole parallel das Wetter, die Termine von heute, die
 Wecker und die Nachrichten und fasse alles in drei bis vier Sätzen zusammen, Nachrichten nur mit den zwei
 wichtigsten Schlagzeilen."""
@@ -68,7 +68,7 @@ SCHLUESSELBUND_DIENST = "anthropic-api-key"
 def schluesselbund(dienst: str) -> Optional[str]:
     """Liest ein Geheimnis aus dem macOS-Schlüsselbund, None wenn es fehlt."""
     ergebnis = subprocess.run(
-        ["security", "find-generic-password", "-s", dienst, "-a", os.environ.get("USER", ""), "-w"],
+        ["/usr/bin/security", "find-generic-password", "-s", dienst, "-a", os.environ.get("USER", ""), "-w"],
         capture_output=True, text=True)
     return ergebnis.stdout.strip() if ergebnis.returncode == 0 else None
 
@@ -121,7 +121,7 @@ _ausgabe_sperre = threading.Lock()
 
 
 def ton(name: str) -> None:
-    subprocess.run(["afplay", f"/System/Library/Sounds/{name}.aiff"])
+    subprocess.run(["/usr/bin/afplay", f"/System/Library/Sounds/{name}.aiff"])
 
 
 def nimm_auf():
@@ -256,7 +256,7 @@ end mkdate
 
 def osascript(skript: str, *argumente: str) -> str:
     """Führt AppleScript aus. Werte gehen als argv hinein, nie per String-Verkettung ins Skript."""
-    ergebnis = subprocess.run(["osascript", "-e", skript, *argumente],
+    ergebnis = subprocess.run(["/usr/bin/osascript", "-e", skript, *argumente],
                               capture_output=True, text=True, timeout=60)
     if ergebnis.returncode != 0:
         raise RuntimeError(ergebnis.stderr.strip())
@@ -523,7 +523,10 @@ end run"""
 
 
 def hole_json(url: str, **kw) -> dict:
-    with urllib.request.urlopen(urllib.request.Request(url, **kw), timeout=10) as antwort:
+    if not url.startswith("https://"):
+        raise ValueError(f"Nur https-Adressen erlaubt: {url}")
+    anfrage = urllib.request.Request(url, **kw)  # noqa: S310 - Schema oben auf https geprüft
+    with urllib.request.urlopen(anfrage, timeout=10) as antwort:  # noqa: S310
         return json.load(antwort)
 
 
@@ -679,13 +682,13 @@ def naechstes_vorkommen(zeit: datetime, tage: list) -> datetime:
 
 def pmset(*argumente: str) -> bool:
     """Ruft "pmset schedule" über sudo ohne Passwort auf; geht nur nach pmset_einrichten()."""
-    ergebnis = subprocess.run(["sudo", "-n", "/usr/bin/pmset", "schedule", *argumente],
+    ergebnis = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/pmset", "schedule", *argumente],
                               capture_output=True, text=True)
     return ergebnis.returncode == 0
 
 
 def pmset_eingerichtet() -> bool:
-    ergebnis = subprocess.run(["sudo", "-n", "-l", "/usr/bin/pmset", "schedule", "wake", "01/01/30 00:00:00"],
+    ergebnis = subprocess.run(["/usr/bin/sudo", "-n", "-l", "/usr/bin/pmset", "schedule", "wake", "01/01/30 00:00:00"],
                               capture_output=True, text=True)
     return ergebnis.returncode == 0
 
@@ -744,7 +747,8 @@ def klingeln(beschreibung: str, ansage: str, max_sek: int) -> None:
     stopp = threading.Event()
     with _uhr_sperre:
         _klingeln[beschreibung] = stopp
-    wach = subprocess.Popen(["caffeinate", "-i", "-d", "-t", str(max_sek)])  # Mac nicht wieder einschlafen lassen
+    # Mac während des Klingelns nicht wieder einschlafen lassen
+    wach = subprocess.Popen(["/usr/bin/caffeinate", "-i", "-d", "-t", str(max_sek)])
     try:
         ende = time.time() + max_sek
         while not stopp.is_set() and time.time() < ende:
@@ -768,29 +772,39 @@ def klingeln_beenden() -> bool:
     return bool(laeuft)
 
 
+def faellige_timer(jetzt: datetime) -> list:
+    """Entfernt abgelaufene Timer und liefert ihre Klingel-Aufträge. Aufruf mit gehaltener _uhr_sperre."""
+    abgelaufen = [name for name, ende in _timer.items() if ende <= jetzt]
+    for name in abgelaufen:
+        del _timer[name]
+    return [(f"Timer {name}", f"Dein Timer {name} ist abgelaufen.", 60) for name in abgelaufen]
+
+
+def faellige_wecker(jetzt: datetime) -> tuple:
+    """Behandelt fällige Wecker: Serien rücken weiter, einmalige fallen weg. Nach dem Ruhezustand verpasste
+    Wecker klingeln nur, wenn sie frisch sind. Liefert (Klingel-Aufträge, ob sich die Wecker geändert haben).
+    Aufruf mit gehaltener _uhr_sperre."""
+    auftraege = []
+    faellig = [w for w in _wecker if datetime.fromisoformat(w["zeit"]) <= jetzt]
+    for w in faellig:
+        zeit = datetime.fromisoformat(w["zeit"])
+        if jetzt - zeit < VERPASST_TOLERANZ:
+            auftraege.append((f"Wecker {w['name']}", f"{w['name']}! Es ist {zeit:%H:%M} Uhr.", 600))
+        if w["tage"]:
+            w["zeit"] = naechstes_vorkommen(zeit, w["tage"]).isoformat(timespec="minutes")
+            wecker_aufwecken_planen(w)
+        else:
+            _wecker.remove(w)
+    return auftraege, bool(faellig)
+
+
 def uhr_schleife() -> None:
     """Prüft jede Sekunde Timer und Wecker. Nutzt die Wanduhr, damit nach dem Ruhezustand nichts verrutscht."""
     while True:
         jetzt = datetime.now()
-        faellig = []
         with _uhr_sperre:
-            for name, ende in list(_timer.items()):
-                if ende <= jetzt:
-                    del _timer[name]
-                    faellig.append((f"Timer {name}", f"Dein Timer {name} ist abgelaufen.", 60))
-            geaendert = False
-            for w in list(_wecker):
-                zeit = datetime.fromisoformat(w["zeit"])
-                if zeit > jetzt:
-                    continue
-                if jetzt - zeit < VERPASST_TOLERANZ:
-                    faellig.append((f"Wecker {w['name']}", f"{w['name']}! Es ist {zeit:%H:%M} Uhr.", 600))
-                if w["tage"]:
-                    w["zeit"] = naechstes_vorkommen(zeit, w["tage"]).isoformat(timespec="minutes")
-                    wecker_aufwecken_planen(w)
-                else:
-                    _wecker.remove(w)
-                geaendert = True
+            wecker_auftraege, geaendert = faellige_wecker(jetzt)
+            faellig = faellige_timer(jetzt) + wecker_auftraege
             if geaendert:
                 wecker_speichern()
         for beschreibung, ansage, max_sek in faellig:
@@ -800,6 +814,18 @@ def uhr_schleife() -> None:
 
 def wann(zeit: datetime) -> str:
     return f"{WOCHENTAGE[zeit.weekday()].capitalize()} {zeit:%d.%m. %H:%M} Uhr"
+
+
+def dauer_gesprochen(sekunden: float) -> str:
+    """Wie dauer_text, aber zum Vorlesen: ausgeschriebene Einheiten, gerundet."""
+    sekunden = max(0, int(round(sekunden)))
+    if sekunden < 60:
+        return f"{sekunden} Sekunden"
+    minuten = round(sekunden / 60)
+    if minuten < 60:
+        return "eine Minute" if minuten == 1 else f"{minuten} Minuten"
+    h, m = divmod(minuten, 60)
+    return ("eine Stunde" if h == 1 else f"{h} Stunden") + (f" {m} Minuten" if m else "")
 
 
 def dauer_text(sekunden: float) -> str:
@@ -858,7 +884,7 @@ def klingeln_stoppen() -> str:
 
 @beta_tool
 def wecker_stellen(zeitpunkt: str, name: str = "Wecker",
-                   wochentage: Optional[List[Literal["mo", "di", "mi", "do", "fr", "sa", "so"]]] = None) -> str:
+                   wochentage: Optional[list[Literal["mo", "di", "mi", "do", "fr", "sa", "so"]]] = None) -> str:
     """Stellt einen Wecker, einmalig oder wiederkehrend an bestimmten Wochentagen. Bleibt nach einem Neustart erhalten.
 
     Args:
@@ -1110,7 +1136,8 @@ def mail_schreiben(empfaenger: str, betreff: str, text: str, senden: bool = Fals
         senden = False
     osascript("""on run argv
     tell application "Mail"
-        set r to make new outgoing message with properties {subject:(item 2 of argv), content:(item 3 of argv), visible:true}
+        set r to make new outgoing message with properties ¬
+            {subject:(item 2 of argv), content:(item 3 of argv), visible:true}
         tell r to make new to recipient at end of to recipients with properties {address:(item 1 of argv)}
         if (item 4 of argv) is "1" then send r
     end tell
@@ -1150,7 +1177,7 @@ def app_oeffnen(name: str) -> str:
     Args:
         name: Name des Programms, wie er im Programme-Ordner steht.
     """
-    ergebnis = subprocess.run(["open", "-a", name], capture_output=True, text=True)
+    ergebnis = subprocess.run(["/usr/bin/open", "-a", name], capture_output=True, text=True)
     return f"{name} ist offen." if ergebnis.returncode == 0 else f"Programm '{name}' nicht gefunden."
 
 
@@ -1187,7 +1214,7 @@ def dunkelmodus(modus: Literal["an", "aus", "umschalten"] = "umschalten") -> str
 @beta_tool
 def bildschirm_sperren() -> str:
     """Schaltet den Bildschirm aus; mit Passwortabfrage beim Aufwachen ist der Mac damit gesperrt."""
-    subprocess.run(["pmset", "displaysleepnow"], check=True)
+    subprocess.run(["/usr/bin/pmset", "displaysleepnow"], check=True)
     return "Bildschirm ist aus."
 
 
@@ -1203,7 +1230,8 @@ def apple_music_abspielen(suche: str) -> str:
     """
     ergebnis = osascript("""on run argv
     tell application "Music"
-        set treffer to (every track of library playlist 1 whose name contains (item 1 of argv) or artist contains (item 1 of argv))
+        set treffer to (every track of library playlist 1 ¬
+            whose name contains (item 1 of argv) or artist contains (item 1 of argv))
         if treffer is {} then return ""
         play item 1 of treffer
         return (name of item 1 of treffer) & " von " & (artist of item 1 of treffer)
@@ -1248,7 +1276,8 @@ def youtube_abspielen(suche: str) -> str:
     if not treffer:
         return f"Kein Video gefunden für '{suche}'."
     video = treffer[0]
-    subprocess.run(["open", "-a", BROWSER, f"https://www.youtube.com/watch?v={video['id']['videoId']}"], check=True)
+    adresse = f"https://www.youtube.com/watch?v={video['id']['videoId']}"
+    subprocess.run(["/usr/bin/open", "-a", BROWSER, adresse], check=True)
     s = video["snippet"]
     return f"Öffne '{s['title']}' vom Kanal {s['channelTitle']}."
 
@@ -1325,7 +1354,8 @@ def nachrichten(anzahl: int = 5) -> str:
 
 def erlaubte_kurzbefehle() -> list:
     def liste(*argumente: str) -> list:
-        ergebnis = subprocess.run(["shortcuts", "list", *argumente], capture_output=True, text=True, timeout=20)
+        ergebnis = subprocess.run(["/usr/bin/shortcuts", "list", *argumente],
+                                  capture_output=True, text=True, timeout=20)
         if ergebnis.returncode != 0:
             raise RuntimeError(ergebnis.stderr.strip() or "Kurzbefehle-App antwortet nicht.")
         return [z.strip() for z in ergebnis.stdout.splitlines() if z.strip()]
@@ -1354,7 +1384,7 @@ def kurzbefehl_ausfuehren(name: str) -> str:
     passend = [n for n in erlaubte_kurzbefehle() if n.lower() == name.strip().lower()]
     if not passend:
         return f"Kurzbefehl '{name}' ist nicht freigegeben. Erlaubt sind: {kurzbefehle_auflisten.call({})}"
-    ergebnis = subprocess.run(["shortcuts", "run", passend[0]], capture_output=True, text=True, timeout=120)
+    ergebnis = subprocess.run(["/usr/bin/shortcuts", "run", passend[0]], capture_output=True, text=True, timeout=120)
     if ergebnis.returncode != 0:
         raise RuntimeError(ergebnis.stderr.strip() or "Kurzbefehl fehlgeschlagen.")
     return f"Kurzbefehl '{passend[0]}' ausgeführt. {ergebnis.stdout.strip()}".strip()
@@ -1375,6 +1405,156 @@ WERKZEUGE = [erinnerung_anlegen, erinnerungen_lesen, erinnerung_abhaken,
              lautstaerke, app_oeffnen, app_beenden, dunkelmodus, bildschirm_sperren,
              apple_music_abspielen, apple_music_steuern, youtube_abspielen, youtube_steuern,
              notiz_anlegen, notizen_suchen, nachricht_senden, kurzbefehle_auflisten, kurzbefehl_ausfuehren]
+
+
+# ---------------------------------------------------------------- Schnellbefehle ohne Claude
+
+# Häufige kurze Befehle erledigt Atlas sofort selbst. Ein Befehl greift nur, wenn der ganze Satz passt;
+# alles andere geht an Claude.
+
+FUELLWOERTER = {"bitte", "mal", "atlas", "hey", "doch", "jetzt", "okay", "ok", "danke"}
+
+ZAHLWOERTER = {
+    "ein": 1, "eine": 1, "einen": 1, "einer": 1, "zwei": 2, "drei": 3, "vier": 4, "fünf": 5, "sechs": 6,
+    "sieben": 7, "acht": 8, "neun": 9, "zehn": 10, "elf": 11, "zwölf": 12, "dreizehn": 13, "vierzehn": 14,
+    "fünfzehn": 15, "sechzehn": 16, "siebzehn": 17, "achtzehn": 18, "neunzehn": 19, "zwanzig": 20,
+    "fünfundzwanzig": 25, "dreißig": 30, "vierzig": 40, "fünfundvierzig": 45, "fünfzig": 50, "sechzig": 60,
+    "neunzig": 90,
+}
+EINHEITEN = {"sekunde": 1, "sekunden": 1, "minute": 60, "minuten": 60, "stunde": 3600, "stunden": 3600}
+
+SCHNELL_TEXTE = {
+    "stopp": {"stopp", "stop", "aus", "ruhe", "schluss", "wecker aus", "timer aus", "stopp den wecker",
+              "stopp den timer", "mach den wecker aus", "mach den timer aus"},
+    "uhrzeit": {"wie spät ist es", "wie viel uhr ist es", "wieviel uhr ist es", "uhrzeit", "wie spät"},
+    "lauter": {"lauter", "mach lauter", "etwas lauter", "ein bisschen lauter", "lauter machen"},
+    "leiser": {"leiser", "mach leiser", "etwas leiser", "ein bisschen leiser", "leiser machen"},
+    "stumm": {"stumm", "ton aus", "stummschalten", "mach den ton aus"},
+    "ton_an": {"ton an", "mach den ton an", "stummschaltung aus"},
+    "pause": {"pause", "musik pause", "musik aus", "stopp die musik", "halt die musik an", "musik stoppen",
+              "anhalten", "pausieren"},
+    "play": {"weiterspielen", "spiel weiter", "fortsetzen", "musik an", "musik weiter", "play"},
+    "naechster": {"nächster titel", "nächstes lied", "nächster song", "überspringen", "skip"},
+    "vorheriger": {"vorheriger titel", "vorheriges lied", "letztes lied", "lied zurück"},
+    "titel": {"was läuft gerade", "was läuft da", "welches lied ist das", "was ist das für ein lied",
+              "wie heißt das lied"},
+    "timer_abfragen": {"wie lange noch", "wie lange läuft der timer noch", "wie lange dauert der timer noch"},
+    "timer_abbrechen": {"timer abbrechen", "brich den timer ab", "timer löschen", "lösch den timer"},
+}
+
+# "timer auf zehn minuten", "stell einen timer für 5 minuten für die nudeln", "zehn minuten timer"
+TIMER_MUSTER = [
+    re.compile(r"(?:stell |starte |mach )?(?:einen |den |nen )?timer (?:auf |für |von )?"
+               r"(?P<zahl>\w+) (?P<einheit>\w+)(?: (?:für (?:die |den |das )?)?(?P<name>.+))?"),
+    re.compile(r"(?P<zahl>\w+) (?P<einheit>\w+) timer(?: (?:für (?:die |den |das )?)?(?P<name>.+))?"),
+]
+
+
+def normalisiere(text: str) -> str:
+    woerter = re.sub(r"[^\wäöüß ]", " ", text.lower()).split()
+    return " ".join(w for w in woerter if w not in FUELLWOERTER)
+
+
+def zahl(wort: str) -> Optional[int]:
+    return int(wort) if wort.isdigit() else ZAHLWOERTER.get(wort)
+
+
+def aktiver_player(nur_spielend: bool = True) -> Optional[str]:
+    """Spotify oder Musik-App, wenn sie gerade spielt. Mit nur_spielend=False auch eine pausierte."""
+    ergebnis = osascript("""on run argv
+    set pausiert to ""
+    if application "Spotify" is running then
+        tell application "Spotify" to if player state is playing then return "Spotify"
+        set pausiert to "Spotify"
+    end if
+    if application "Music" is running then
+        tell application "Music" to if player state is playing then return "Music"
+        if pausiert is "" then set pausiert to "Music"
+    end if
+    if (item 1 of argv) is "1" then return ""
+    return pausiert
+end run""", "1" if nur_spielend else "0")
+    return ergebnis or None
+
+
+def player_befehl(aktion: str) -> Optional[str]:
+    """Steuert Spotify oder Musik. None, wenn keiner passt; dann entscheidet Claude, z. B. für YouTube."""
+    player = aktiver_player(nur_spielend=aktion != "play")
+    if not player:
+        return None
+    befehle = SPOTIFY_BEFEHLE if player == "Spotify" else MUSIC_BEFEHLE
+    osascript(f'tell application "{player}" to {befehle[aktion]}')
+    return "Okay."
+
+
+def _schnell_stopp() -> Optional[str]:
+    # "Stopp" schaltet zuerst etwas Klingelndes aus, sonst hält es die Musik an
+    return "Okay, ist aus." if klingeln_beenden() else player_befehl("pause")
+
+
+def _schnell_lautstaerke(aktion: str) -> str:
+    lautstaerke.call({"aktion": aktion})
+    return "Okay."
+
+
+def _schnell_titel() -> Optional[str]:
+    # Nur Spotify kennt hier den Titel; bei der Musik-App oder ohne Wiedergabe fragt Claude
+    return spotify_aktueller_titel.call({}) if aktiver_player() == "Spotify" else None
+
+
+def _schnell_timer_abfragen() -> str:
+    with _uhr_sperre:
+        laufend = sorted(_timer.items(), key=lambda t: t[1])
+    if not laufend:
+        return "Es läuft kein Timer."
+    jetzt = datetime.now()
+    return ", ".join(f"{name} noch {dauer_gesprochen((ende - jetzt).total_seconds())}"
+                     for name, ende in laufend) + "."
+
+
+def _schnell_timer_abbrechen() -> Optional[str]:
+    with _uhr_sperre:
+        anzahl = len(_timer)
+    if anzahl > 1:
+        return None  # mehrere Timer: Claude fragt nach, welcher gemeint ist
+    return timer_abbrechen.call({}) if anzahl else "Es läuft kein Timer."
+
+
+SCHNELL_AKTIONEN = {
+    "stopp": _schnell_stopp,
+    "uhrzeit": lambda: f"Es ist {datetime.now():%H:%M} Uhr.",
+    "lauter": lambda: _schnell_lautstaerke("lauter"),
+    "leiser": lambda: _schnell_lautstaerke("leiser"),
+    "stumm": lambda: _schnell_lautstaerke("stumm"),
+    "ton_an": lambda: _schnell_lautstaerke("ton_an"),
+    "pause": lambda: player_befehl("pause"),
+    "play": lambda: player_befehl("play"),
+    "naechster": lambda: player_befehl("weiter"),
+    "vorheriger": lambda: player_befehl("zurueck"),
+    "titel": _schnell_titel,
+    "timer_abfragen": _schnell_timer_abfragen,
+    "timer_abbrechen": _schnell_timer_abbrechen,
+}
+
+
+def _schnell_timer_stellen(t: str) -> Optional[str]:
+    for muster in TIMER_MUSTER:
+        treffer = muster.fullmatch(t)
+        if treffer and zahl(treffer["zahl"]) and treffer["einheit"] in EINHEITEN:
+            sekunden = zahl(treffer["zahl"]) * EINHEITEN[treffer["einheit"]]
+            name = (treffer["name"] or "").strip().capitalize() or "Timer"
+            timer_stellen.call({"dauer_sekunden": sekunden, "name": name})
+            return f"Timer für {treffer['zahl']} {treffer['einheit']} läuft."
+    return None
+
+
+def schnellbefehl(text: str) -> Optional[str]:
+    """Antwort für einen bekannten Kurzbefehl, oder None, wenn Claude übernehmen soll."""
+    t = normalisiere(text)
+    art = next((a for a, saetze in SCHNELL_TEXTE.items() if t in saetze), None)
+    if art:
+        return SCHNELL_AKTIONEN[art]()
+    return _schnell_timer_stellen(t)
 
 
 # ---------------------------------------------------------------- Claude-Schleife
@@ -1417,12 +1597,32 @@ def ask(text: str) -> str:
     return antwort or "Erledigt."
 
 
+def pmset_befehl() -> bool:
+    """Führt --pmset-einrichten oder --pmset-entfernen aus. True, wenn einer der beiden angegeben war."""
+    if "--pmset-einrichten" in sys.argv:
+        pmset_einrichten()
+    elif "--pmset-entfernen" in sys.argv:
+        pmset_entfernen()
+    else:
+        return False
+    print("pmset eingerichtet: Der Mac wacht vor Weckern auf." if pmset_eingerichtet()
+          else "pmset ist nicht (mehr) eingerichtet.")
+    return True
+
+
+def eine_runde(folgefrage: bool) -> bool:
+    """Hört zu und antwortet einmal. Liefert, ob danach ohne Wake-Word weitergehört werden soll."""
+    # Nach einer Antwort kurz ohne Wake-Word weiterhören; Stille führt zurück zum Wake-Word
+    text = hoere(direkt=True, max_warten_sek=NACHFRAGE_SEK) if folgefrage else hoere()
+    if not text:
+        return False
+    sprich(schnellbefehl(text) or ask(text))
+    return MODUS == "wake" and NACHFRAGE_SEK > 0
+
+
 def main() -> None:
     wecker_laden()
-    if "--pmset-einrichten" in sys.argv or "--pmset-entfernen" in sys.argv:
-        pmset_einrichten() if "--pmset-einrichten" in sys.argv else pmset_entfernen()
-        print("pmset eingerichtet: Der Mac wacht vor Weckern auf." if pmset_eingerichtet()
-              else "pmset ist nicht (mehr) eingerichtet.")
+    if pmset_befehl():
         return
     threading.Thread(target=uhr_schleife, daemon=True).start()
     if not TEXTMODUS:
@@ -1432,20 +1632,12 @@ def main() -> None:
     folgefrage = False
     while True:
         try:
-            # Nach einer Antwort kurz ohne Wake-Word weiterhören; Stille führt zurück zum Wake-Word
-            if folgefrage:
-                text = hoere(direkt=True, max_warten_sek=NACHFRAGE_SEK)
-            else:
-                text = hoere()
-            folgefrage = False
-            if not text:
-                continue
-            sprich(ask(text))
-            folgefrage = MODUS == "wake" and NACHFRAGE_SEK > 0
+            folgefrage = eine_runde(folgefrage)
         except (KeyboardInterrupt, EOFError):
             print()
             break
         except Exception as fehler:  # Assistent soll bei einzelnen Fehlern weiterlaufen
+            folgefrage = False
             print(f"Fehler: {fehler}", file=sys.stderr)
             sprich("Da ist etwas schiefgegangen.")
 

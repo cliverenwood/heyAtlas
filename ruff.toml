@@ -1,0 +1,31 @@
+# ruff-Konfiguration für heyAtlas, angelehnt an das "Sonar way"-Profil.
+# Prüfen: uvx ruff check .   Korrigieren: uvx ruff check --fix .
+
+line-length = 120
+# Das Projekt läuft auf dem Python 3.9 von macOS. Wichtig: Ein höheres Ziel würde
+# Optional[X] in "X | None" umschreiben; die Werkzeug-Beschreibungen werten diese
+# Typangaben zur Laufzeit aus, und Python 3.9 kennt die Schreibweise dort nicht.
+target-version = "py39"
+extend-exclude = ["assets"]
+
+[lint]
+select = [
+  "E",    # pycodestyle-Fehler
+  "F",    # pyflakes: undefinierte Namen, ungenutzte Importe
+  "W",    # pycodestyle-Warnungen
+  "C90",  # mccabe: zyklomatische Komplexität
+  "I",    # isort: Import-Reihenfolge
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear: wahrscheinliche Fehler
+  "S",    # flake8-bandit: Sicherheit
+  "SIM",  # flake8-simplify
+]
+ignore = [
+  # Jeder subprocess-Aufruf meldet S603. Hier gehen Argumente immer als Liste ohne Shell
+  # hinein, Werte von Claude landen bei AppleScript in argv statt im Skripttext.
+  "S603",
+]
+
+[lint.mccabe]
+max-complexity = 10
