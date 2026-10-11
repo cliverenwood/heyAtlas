@@ -1236,31 +1236,60 @@ end run""", suche)
 
 # ---------------------------------------------------------------- iMessage
 
-def kontakte_suchen(name: str) -> list:
-    """Sucht in der Kontakte-App. Liefert [(Name, [Telefonnummern], [E-Mail-Adressen])]."""
-    treffer = osascript("""on run argv
-    set ausgabe to ""
-    tell application "Contacts"
-        repeat with p in (people whose name contains (item 1 of argv))
-            set nummern to ""
-            repeat with t in phones of p
-                set nummern to nummern & (value of t) & ";"
-            end repeat
-            set mails to ""
-            repeat with m in emails of p
-                set mails to mails & (value of m) & ";"
-            end repeat
-            set ausgabe to ausgabe & (name of p) & "|" & nummern & "|" & mails & linefeed
-        end repeat
-    end tell
-    return ausgabe
-end run""", name)
+_adressbuch = {"bis": 0.0, "kontakte": []}
+
+
+def adressbuch() -> list:
+    """Alle Kontakte mit Telefonnummer oder E-Mail, direkt über Apples Kontakte-Schnittstelle (die Kontakte-App
+    muss dafür nicht laufen). [(Name, [Telefonnummern], [E-Mail-Adressen])], 10 Minuten zwischengespeichert."""
+    if time.time() < _adressbuch["bis"]:
+        return _adressbuch["kontakte"]
+    import Contacts
+
+    if Contacts.CNContactStore.authorizationStatusForEntityType_(Contacts.CNEntityTypeContacts) != \
+            Contacts.CNAuthorizationStatusAuthorized:
+        raise RuntimeError("Kein Zugriff auf die Kontakte. Systemeinstellungen → Datenschutz & Sicherheit → "
+                           "Kontakte → heyAtlas einschalten.")
+    schluessel = [Contacts.CNContactGivenNameKey, Contacts.CNContactFamilyNameKey,
+                  Contacts.CNContactOrganizationNameKey, Contacts.CNContactPhoneNumbersKey,
+                  Contacts.CNContactEmailAddressesKey]
+    anfrage = Contacts.CNContactFetchRequest.alloc().initWithKeysToFetch_(schluessel)
     kontakte = []
-    for zeile in treffer.splitlines():
-        if zeile.count("|") == 2:
-            n, nummern, mails = zeile.split("|")
-            kontakte.append((n, [x for x in nummern.split(";") if x], [x for x in mails.split(";") if x]))
+
+    def sammeln(kontakt, _stopp):
+        name = f"{kontakt.givenName()} {kontakt.familyName()}".strip() or str(kontakt.organizationName())
+        nummern = [str(t.value().stringValue()) for t in kontakt.phoneNumbers()]
+        mails = [str(m.value()) for m in kontakt.emailAddresses()]
+        if name and (nummern or mails):
+            kontakte.append((name, nummern, mails))
+
+    Contacts.CNContactStore.alloc().init().enumerateContactsWithFetchRequest_error_usingBlock_(anfrage, None, sammeln)
+    _adressbuch.update(bis=time.time() + 600, kontakte=kontakte)
     return kontakte
+
+
+def kontakte_erlauben() -> str:
+    import Contacts
+
+    speicher = Contacts.CNContactStore.alloc().init()
+    if Contacts.CNContactStore.authorizationStatusForEntityType_(Contacts.CNEntityTypeContacts) == \
+            Contacts.CNAuthorizationStatusNotDetermined:
+        fertig, ergebnis = threading.Event(), {}
+
+        def antwort(erlaubt, _fehler):
+            ergebnis["erlaubt"] = erlaubt
+            fertig.set()
+
+        speicher.requestAccessForEntityType_completionHandler_(Contacts.CNEntityTypeContacts, antwort)
+        fertig.wait(300)
+    erlaubt = Contacts.CNContactStore.authorizationStatusForEntityType_(Contacts.CNEntityTypeContacts) == \
+        Contacts.CNAuthorizationStatusAuthorized
+    return "erlaubt" if erlaubt else "abgelehnt"
+
+
+def kontakte_suchen(name: str) -> list:
+    """Kontakte, deren Name den Suchbegriff enthält. [(Name, [Telefonnummern], [E-Mail-Adressen])]"""
+    return [k for k in adressbuch() if name.lower() in k[0].lower()]
 
 
 def eindeutiger_kontakt(name: str, nur_mail: bool = False, nur_telefon: bool = False):
@@ -1330,24 +1359,6 @@ WHERE m.is_from_me = 0 AND m.date > ? AND (? = 0 OR m.is_read = 0)
 ORDER BY m.date DESC LIMIT 200
 """
 
-# Alle Kontakte in drei Apple Events statt einem pro Kontakt; Ausgabe "Name<31>Adresse;Adresse<30>"
-KONTAKT_VERZEICHNIS = """set feld to character id 31
-set satz to character id 30
-tell application "Contacts"
-    set namen to name of every person
-    set nummern to value of phones of every person
-    set mails to value of emails of every person
-end tell
-set ausgabe to ""
-repeat with i from 1 to count of namen
-    set werte to ""
-    repeat with w in (item i of nummern) & (item i of mails)
-        set werte to werte & w & ";"
-    end repeat
-    if werte is not "" then set ausgabe to ausgabe & (item i of namen) & feld & werte & satz
-end repeat
-return ausgabe"""
-
 _verzeichnis = {"bis": 0.0, "eintraege": {}}
 _letzte_imessages: dict = {}  # Kennung N1… -> (Chat-Kennung, Absender, Name)
 
@@ -1360,13 +1371,14 @@ def handle_schluessel(adresse: str) -> str:
 
 
 def kontaktname(adresse: str) -> str:
-    if time.time() > _verzeichnis["bis"]:  # 30 Minuten zwischenspeichern
-        eintraege = {}
-        for satz in osascript(KONTAKT_VERZEICHNIS).split("\x1e"):
-            if "\x1f" in satz:
-                name, werte = satz.split("\x1f", 1)
-                eintraege.update({handle_schluessel(w): name for w in werte.split(";") if w})
-        _verzeichnis.update(bis=time.time() + 1800, eintraege=eintraege)
+    """Name zur Nummer oder Adresse; ohne Kontakte-Zugriff bleibt es bei der Nummer statt eines Fehlers."""
+    if time.time() > _verzeichnis["bis"]:
+        try:
+            eintraege = {handle_schluessel(w): name for name, nummern, mails in adressbuch() for w in nummern + mails}
+        except RuntimeError as fehler:
+            print(f"Kontaktnamen: {fehler}", file=sys.stderr)
+            eintraege = {}
+        _verzeichnis.update(bis=time.time() + 600, eintraege=eintraege)
     return _verzeichnis["eintraege"].get(handle_schluessel(adresse or ""), adresse or "unbekannt")
 
 
@@ -1955,7 +1967,7 @@ def verbindung_suchen(ziel: str, start: Optional[str] = None, zeitpunkt: Optiona
 
 # Apps, die Atlas per AppleScript steuert: (Anzeigename, App-Name)
 AUTOMATION_ZIELE = [("Kalender", "Calendar"), ("Erinnerungen", "Reminders"), ("Notizen", "Notes"),
-                    ("Mail", "Mail"), ("Nachrichten", "Messages"), ("Kontakte", "Contacts"), ("Musik", "Music"),
+                    ("Mail", "Mail"), ("Nachrichten", "Messages"), ("Musik", "Music"),
                     ("Spotify", "Spotify"), (BROWSER, BROWSER), ("Systemereignisse", "System Events")]
 
 
@@ -1985,6 +1997,10 @@ def eventkit_erlauben(art: str) -> str:
         return "abgelehnt"
 
 
+# Harmloser Befehl je App, den sie per AppleScript versteht (Spotify und Musik kennen keine Fenster)
+TESTBEFEHLE = {"System Events": "count processes", "Spotify": "get player state", "Music": "get player state"}
+
+
 def automation_erlauben(app: str) -> str:
     """Löst die Abfrage "heyAtlas möchte <App> steuern" aus. macOS fragt erst beim ersten echten Befehl, und dafür
     muss die App laufen; nicht laufende Apps startet Atlas dazu unsichtbar und beendet sie danach wieder."""
@@ -1997,15 +2013,16 @@ def automation_erlauben(app: str) -> str:
             if osascript(f'application "{app}" is running') == "true":
                 break
             time.sleep(0.25)
-    befehl = "count processes" if app == "System Events" else "count windows"
+    befehl = TESTBEFEHLE.get(app, "count windows")
     # Lange Wartezeit: Der Dialog bleibt offen, bis der Nutzer antwortet
     ergebnis = subprocess.run(["/usr/bin/osascript", "-e", f'tell application "{app}" to {befehl}'],
                               capture_output=True, text=True, timeout=300)
     if not lief and app != "System Events":
         app_beenden_ohne_steuerung(app)
-    if ergebnis.returncode == 0:
+    # Jeder andere Fehler als -1743 heißt: Der Befehl kam an, die Steuerung ist also erlaubt
+    if ergebnis.returncode == 0 or "-1743" not in ergebnis.stderr and "-600" not in ergebnis.stderr:
         return "erlaubt"
-    return "abgelehnt" if "-1743" in ergebnis.stderr else f"Fehler: {ergebnis.stderr.strip()[:60]}"
+    return "abgelehnt" if "-1743" in ergebnis.stderr else "nicht geprüft (App lief nicht)"
 
 
 def app_beenden_ohne_steuerung(app: str) -> None:
@@ -2032,7 +2049,8 @@ def berechtigungen_einrichten() -> list:
     """Fragt alle Zugriffe nacheinander ab. Liefert [(Bereich, Ergebnis)] für die Übersicht."""
     schritte = [("Mikrofon", mikrofon_erlauben),
                 ("Kalender (Vollzugriff)", lambda: eventkit_erlauben("termine")),
-                ("Erinnerungen (Vollzugriff)", lambda: eventkit_erlauben("erinnerungen"))]
+                ("Erinnerungen (Vollzugriff)", lambda: eventkit_erlauben("erinnerungen")),
+                ("Kontakte", kontakte_erlauben)]
     schritte += [(f"Steuerung: {anzeige}", lambda app=app: automation_erlauben(app))
                  for anzeige, app in AUTOMATION_ZIELE]
     if NACHRICHTEN_LESEN:
@@ -2060,8 +2078,26 @@ ABLEHNEN = ("Ablehnen", "Decline")
 AUFLEGEN = ("Beenden", "Auflegen", "End", "Leave")
 ANRUF_PROZESSE = ("NotificationCenter", "FaceTime")
 
+# Beschriftung eines Knopfs: bei Mitteilungen steht sie oft nur in der Beschreibung, der Name ist leer
+BESCHRIFTUNG = """
+on beschriftung(element)
+    tell application "System Events"
+        set bez to ""
+        try
+            set bez to name of element as text
+        end try
+        if bez is "" or bez is "missing value" then
+            try
+                set bez to description of element as text
+            end try
+        end if
+        return bez
+    end tell
+end beschriftung
+"""
+
 # Liefert je Fenster mit Knöpfen eine Zeile "Prozess<31>Knopf;Knopf;<31>Text;Text;"
-ANRUF_ANZEIGE = """set feld to character id 31
+ANRUF_ANZEIGE = BESCHRIFTUNG + """set feld to character id 31
 set ausgabe to ""
 tell application "System Events"
     repeat with prozessname in {"NotificationCenter", "FaceTime"}
@@ -2073,8 +2109,8 @@ tell application "System Events"
                     repeat with element in (entire contents of fenster)
                         try
                             set art to role of element
-                            if art is "AXButton" then set knoepfe to knoepfe & (name of element) & ";"
-                            if art is "AXStaticText" then set texte to texte & (value of element) & ";"
+                            if art is "AXButton" then set knoepfe to knoepfe & my beschriftung(element) & ";"
+                            if art is "AXStaticText" then set texte to texte & (value of element as text) & ";"
                         end try
                     end repeat
                     if knoepfe is not "" then ¬
@@ -2086,8 +2122,8 @@ tell application "System Events"
 end tell
 return ausgabe"""
 
-# Drückt den ersten Knopf mit einem der Namen aus argv
-ANRUF_KNOPF = """on run argv
+# Drückt den ersten Knopf mit einer der Beschriftungen aus argv
+ANRUF_KNOPF = BESCHRIFTUNG + """on run argv
     tell application "System Events"
         repeat with prozessname in {"NotificationCenter", "FaceTime"}
             if exists process prozessname then
@@ -2095,9 +2131,12 @@ ANRUF_KNOPF = """on run argv
                     repeat with fenster in windows
                         repeat with element in (entire contents of fenster)
                             try
-                                if role of element is "AXButton" and argv contains (name of element) then
-                                    perform action "AXPress" of element
-                                    return name of element
+                                if role of element is "AXButton" then
+                                    set bez to my beschriftung(element)
+                                    if argv contains bez then
+                                        perform action "AXPress" of element
+                                        return bez
+                                    end if
                                 end if
                             end try
                         end repeat
@@ -2130,9 +2169,31 @@ def anrufer_aus(texte: list) -> str:
     return "unbekannt"
 
 
+_diagnose = {"anzeige": None, "besitzer": None}
+
+
+def anruf_diagnose(fenster: list) -> None:
+    """Schreibt Änderungen ins Log: welche Fenster die Anrufanzeige hat und welche Programme neu Fenster zeigen.
+    Damit lässt sich nach einem Testanruf sehen, wie die Anzeige unter dieser macOS-Version aufgebaut ist."""
+    if fenster != _diagnose["anzeige"]:
+        print(f"Anrufanzeige: {fenster}")
+        _diagnose["anzeige"] = fenster
+    try:
+        import Quartz
+
+        liste = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+        besitzer = {str(f.get("kCGWindowOwnerName")) for f in liste if f.get("kCGWindowLayer", 0) > 0}
+    except Exception:  # Diagnose darf die Überwachung nie stören
+        return
+    if _diagnose["besitzer"] is not None and besitzer - _diagnose["besitzer"]:
+        print(f"Neue Fenster von: {sorted(besitzer - _diagnose['besitzer'])}")
+    _diagnose["besitzer"] = besitzer
+
+
 def anruf_pruefen() -> None:
     """Ein Durchgang der Anrufüberwachung: Klingeln ansagen, nach dem Gespräch fortsetzen."""
     fenster = anrufanzeige()
+    anruf_diagnose(fenster)
     knoepfe = {k for _, ks, _ in fenster for k in ks}
     klingelt = bool(knoepfe & set(ANNEHMEN))
     if klingelt and not ANRUF["klingelt"]:
@@ -2168,6 +2229,7 @@ def anruf_ueberwachung() -> None:
             fehlt = anruf_berechtigung_fehlt(str(fehler))
             if fehlt:
                 melde_status(f"Anrufe: {fehlt} für heyAtlas fehlt")
+                print(f"Anrufüberwachung: {fehlt} fehlt ({fehler})", file=sys.stderr)
                 time.sleep(30)
             else:
                 print(f"Anrufüberwachung: {fehler}", file=sys.stderr)
