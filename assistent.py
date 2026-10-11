@@ -65,10 +65,10 @@ WHISPER_MODELL = einstellung("WHISPER_MODELL", "mlx-community/whisper-small-mlx"
 ABTASTRATE = 16000
 
 # Pfad zu einer .onnx-Datei oder ein mitgeliefertes openWakeWord-Modell (hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
-# Standard bleibt "Hey Jarvis": Das erste selbst trainierte "Hey Atlas" erkannte die echte Stimme des
-# Nutzers kaum (Höchstwert 0,10 bei Schwelle 0,5). Auswählbar ist es trotzdem, z. B. WAKEWORD=<HEY_ATLAS>.
+# Standard ist das selbst trainierte "Hey Atlas" (zweite Version; die erste erkannte die echte Stimme kaum).
+# Fehlt die Datei, bleibt "Hey Jarvis" als Rückfall.
 HEY_ATLAS = os.path.join(ORDNER, "assets", "wakeword", "hey_atlas.onnx")
-WAKEWORD = einstellung("WAKEWORD", "hey_jarvis")
+WAKEWORD = einstellung("WAKEWORD", HEY_ATLAS if os.path.exists(HEY_ATLAS) else "hey_jarvis")
 WAKEWORD_SCHWELLE = float(einstellung("WAKEWORD_SCHWELLE", "0.5"))
 BLOCK = 1280  # 80 ms bei 16 kHz, die Blockgröße, die openWakeWord erwartet
 # So lange hört der Assistent nach einer Antwort ohne Wake-Word weiter zu; 0 schaltet Folgefragen ab
@@ -167,22 +167,33 @@ def melde_status(text: str, hoert: bool = False) -> None:
 _stimme = None
 
 
+_download_sperre = threading.Lock()
+
+
 def stimmen_pfad(name: str) -> str:
-    """Pfad zur Piper-Stimme; lädt sie beim ersten Mal herunter (20 bis 120 MB)."""
+    """Pfad zur Piper-Stimme; lädt sie beim ersten Mal herunter (20 bis 120 MB).
+    Eine Stimme gilt erst als vorhanden, wenn Modell und Konfiguration vollständig da sind."""
     if name.endswith(".onnx"):
         return name
-    for ordner in (STIMMEN_ORDNER, os.path.join(ORDNER, "stimmen")):
-        pfad = os.path.join(ordner, name + ".onnx")
-        if os.path.exists(pfad):
-            return pfad
-    from pathlib import Path
+    with _download_sperre:  # zweiter Klick während eines Downloads wartet, statt Halbfertiges zu laden
+        for ordner in (STIMMEN_ORDNER, os.path.join(ORDNER, "stimmen")):
+            pfad = os.path.join(ordner, name + ".onnx")
+            if os.path.exists(pfad) and os.path.exists(pfad + ".json"):
+                return pfad
+        import shutil
+        import tempfile
+        from pathlib import Path
 
-    from piper.download_voices import download_voice
+        from piper.download_voices import download_voice
 
-    melde_status(f"Lade Stimme {name} …")
-    os.makedirs(STIMMEN_ORDNER, exist_ok=True)
-    download_voice(name, Path(STIMMEN_ORDNER))
-    return os.path.join(STIMMEN_ORDNER, name + ".onnx")
+        melde_status(f"Lade Stimme {name} …")
+        os.makedirs(STIMMEN_ORDNER, exist_ok=True)
+        # Erst in einen Zwischenordner, dann verschieben: ein abgebrochener Download hinterlässt nichts Halbes
+        with tempfile.TemporaryDirectory(dir=STIMMEN_ORDNER) as zwischen:
+            download_voice(name, Path(zwischen))
+            for endung in (".onnx.json", ".onnx"):  # Modell zuletzt, es zählt als Zeichen für "fertig"
+                shutil.move(os.path.join(zwischen, name + endung), os.path.join(STIMMEN_ORDNER, name + endung))
+        return os.path.join(STIMMEN_ORDNER, name + ".onnx")
 
 
 def lade_stimme(name: Optional[str] = None):
@@ -197,17 +208,34 @@ def lade_stimme(name: Optional[str] = None):
     return _stimme
 
 
-def sprich(text: str) -> None:
-    """Piper erzeugt die Sprache satzweise; der erste Satz läuft schon, während der Rest entsteht."""
-    import sounddevice as sd
+def vorlesen(text: str, stimme=None) -> None:
+    """Spielt Text mit afplay ab, Satz für Satz; der nächste Satz entsteht, während der vorige läuft.
+    Bewusst nicht über sounddevice: dessen Abspielfunktion läuft in Python und bekommt neben der
+    Wake-Word-Erkennung nicht rechtzeitig Rechenzeit, das gab heftiges Knacken."""
+    import tempfile
+    import wave
 
+    stimme = stimme or lade_stimme()
+    with _ausgabe_sperre, tempfile.TemporaryDirectory() as ordner:  # Timer und Wecker sprechen aus Threads
+        laufend = None
+        for nummer, teil in enumerate(stimme.synthesize(text)):
+            datei = os.path.join(ordner, f"{nummer}.wav")
+            with wave.open(datei, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(teil.sample_rate)
+                w.writeframes(teil.audio_int16_bytes)
+            if laufend:
+                laufend.wait()
+            laufend = subprocess.Popen(["/usr/bin/afplay", datei])
+        if laufend:
+            laufend.wait()
+
+
+def sprich(text: str) -> None:
     print(f"🔊 {text}")
-    if TEXTMODUS:
-        return
-    with _ausgabe_sperre:  # Timer und Wecker sprechen aus einem eigenen Thread
-        for teil in lade_stimme().synthesize(text):
-            sd.play(teil.audio_float_array, teil.sample_rate)
-            sd.wait()
+    if not TEXTMODUS:
+        vorlesen(text)
 
 
 _ausgabe_sperre = threading.Lock()

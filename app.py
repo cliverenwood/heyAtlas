@@ -81,6 +81,23 @@ SCHLUESSEL = {
 }
 
 
+def menueleisten_bild(pfad_1x: str):
+    """Symbol mit allen Auflösungen (1x, 2x, 3x) als Vorlage. rumps lädt nur die 1x-Datei und vergrößert sie;
+    auf Retina-Bildschirmen wirkt das Symbol dann unscharf."""
+    from AppKit import NSImage, NSImageRep
+
+    groesse = (18, 18)  # Punkte, Standardgröße für Menüleisten-Symbole
+    bild = NSImage.alloc().initWithSize_(groesse)
+    basis = pfad_1x.removesuffix(".png")
+    for datei in (pfad_1x, basis + "@2x.png", basis + "@3x.png"):
+        darstellung = NSImageRep.imageRepWithContentsOfFile_(datei)
+        if darstellung is not None:
+            darstellung.setSize_(groesse)
+            bild.addRepresentation_(darstellung)
+    bild.setTemplate_(True)  # macOS färbt es passend zu hellem und dunklem Modus
+    return bild
+
+
 def app_paket() -> str:
     """Pfad der .app, wenn Atlas als App läuft, sonst leer. Python liegt dort in Contents/MacOS."""
     paket = os.path.dirname(os.path.dirname(os.path.dirname(sys.executable)))
@@ -90,6 +107,8 @@ def app_paket() -> str:
 class AtlasApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("heyAtlas", icon=ICON_BEREIT, template=True, quit_button=None)
+        self.bilder = {ICON_BEREIT: menueleisten_bild(ICON_BEREIT), ICON_HOERT: menueleisten_bild(ICON_HOERT)}
+        self._icon_nsimage = self.bilder[ICON_BEREIT]  # rumps setzt dieses Bild beim Start ins Symbol
         self.status = rumps.MenuItem("Startet …")
         self.pause = rumps.MenuItem("Pausieren", callback=self.pausieren)
         self.autostart = rumps.MenuItem("Bei Anmeldung starten", callback=self.autostart_umschalten)
@@ -153,7 +172,8 @@ class AtlasApp(rumps.App):
         self.status.title = atlas.STATUS["text"]
         icon = ICON_HOERT if atlas.STATUS["hoert"] else ICON_BEREIT
         if icon != self.letztes_icon:
-            self.icon, self.letztes_icon = icon, icon
+            self._nsapp.nsstatusitem.button().setImage_(self.bilder[icon])
+            self.letztes_icon = icon
 
     def pausieren(self, eintrag) -> None:
         if atlas.PAUSIERT.is_set():
@@ -223,13 +243,7 @@ class AtlasApp(rumps.App):
 
     def probehoeren(self, name: str) -> None:
         def sprechen() -> None:
-            import sounddevice as sd
-
-            stimme = atlas.lade_stimme(name)
-            with atlas._ausgabe_sperre:
-                for teil in stimme.synthesize("Hallo, ich bin Atlas. So klinge ich mit dieser Stimme."):
-                    sd.play(teil.audio_float_array, teil.sample_rate)
-                    sd.wait()
+            atlas.vorlesen("Hallo, ich bin Atlas. So klinge ich mit dieser Stimme.", atlas.lade_stimme(name))
 
         threading.Thread(target=sprechen, daemon=True).start()
 

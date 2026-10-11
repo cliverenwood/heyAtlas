@@ -15,7 +15,10 @@ PY_FW=/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12
 WEGLASSEN=(torch torchgen functorch sympy networkx mpmath PyObjCTest pip setuptools)
 
 echo "▶ App-Gerüst"
-rm -rf build && mkdir -p $INHALT/MacOS $INHALT/Resources/app/assets/icons/out
+# Noch eingehängte DMGs aus build/ auswerfen; sonst legt Finder dort während des Löschens neue Dateien an
+hdiutil info | awk -v ziel="$PWD/build/" '/^image-path/ {bild = (index($3, ziel) == 1)} bild && /\/Volumes\// {print $1}' |
+  while read -r geraet; do hdiutil detach -quiet "$geraet" || true; done
+rm -rf $APP build/heyAtlas-*.dmg(N) && mkdir -p $INHALT/MacOS $INHALT/Resources/app/assets/icons/out
 sed -e "s/VERSION/$VERSION/" -e "s/BUILD/$BUILD/" packaging/Info.plist > $INHALT/Info.plist
 plutil -lint $INHALT/Info.plist >/dev/null
 clang -O2 -Wall -Werror -o $INHALT/MacOS/heyAtlas packaging/launcher.c
