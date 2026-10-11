@@ -2155,7 +2155,9 @@ def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0, mitteilunge
     elif rolle == "AXStaticText" and _ax(element, ApplicationServices.kAXValueAttribute):
         texte.append(str(_ax(element, ApplicationServices.kAXValueAttribute)))
     knoepfe += [(beschriftung, element, aktion) for beschriftung, aktion in _ax_aktionen(element)]
-    for kind in _ax(element, ApplicationServices.kAXChildrenAttribute) or []:
+    # Manche Elemente nennen ihre Kinder nur in der Navigationsreihenfolge
+    kinder = _ax(element, ApplicationServices.kAXChildrenAttribute) or _ax(element, "AXChildrenInNavigationOrder")
+    for kind in kinder or []:
         _ax_sammeln(kind, knoepfe, texte, tiefe + 1, mitteilungen)
 
 
@@ -2198,6 +2200,86 @@ def _anruf_fenster() -> list:
     return ergebnis
 
 
+def _ax_punkt_und_groesse(element):
+    """Position und Größe eines Elements in Bildschirmkoordinaten, oder (None, None)."""
+    import ApplicationServices
+
+    werte = []
+    for attribut, typ in ((ApplicationServices.kAXPositionAttribute, ApplicationServices.kAXValueCGPointType),
+                          (ApplicationServices.kAXSizeAttribute, ApplicationServices.kAXValueCGSizeType)):
+        roh = _ax(element, attribut)
+        ok, wert = ApplicationServices.AXValueGetValue(roh, typ, None) if roh is not None else (False, None)
+        werte.append(wert if ok else None)
+    return werte[0], werte[1]
+
+
+def _element_beschreiben(element) -> tuple:
+    import ApplicationServices
+
+    return tuple(str(_ax(element, a) or "") for a in (
+        ApplicationServices.kAXRoleAttribute, ApplicationServices.kAXTitleAttribute,
+        ApplicationServices.kAXDescriptionAttribute, ApplicationServices.kAXIdentifierAttribute))
+
+
+def mitteilung_abtasten(mitteilung) -> list:
+    """Fragt in einem 10-Pixel-Raster, welches Element an jeder Stelle der Mitteilung liegt (wie VoiceOver). So
+    werden auch Inhalte gefunden, die ein anderer Prozess hineinzeichnet. Liefert [(Beschriftung, Element, Aktion)]."""
+    import ApplicationServices
+
+    punkt, groesse = _ax_punkt_und_groesse(mitteilung)
+    if punkt is None or groesse is None:
+        print("Abtasten: Position der Mitteilung unbekannt")
+        return []
+    system = ApplicationServices.AXUIElementCreateSystemWide()
+    gesehen, funde = set(), []
+    for y in range(int(punkt.y) + 5, int(punkt.y + groesse.height) - 2, 10):
+        for x in range(int(punkt.x) + 5, int(punkt.x + groesse.width) - 2, 10):
+            fehler, element = ApplicationServices.AXUIElementCopyElementAtPosition(system, float(x), float(y), None)
+            if fehler or element is None or _element_beschreiben(element) in gesehen:
+                continue
+            gesehen.add(_element_beschreiben(element))
+            knoepfe, texte = [], []
+            _ax_sammeln(element, knoepfe, texte)
+            pid = ApplicationServices.AXUIElementGetPid(element, None)[1]
+            print(f"Abtasten ({x},{y}) pid {pid}: {_element_beschreiben(element)} Knöpfe {[k for k, _, _ in knoepfe]}"
+                  f" Texte {texte[:4]}")
+            funde += knoepfe
+    return funde
+
+
+ANRUF_PROZESS_MUSTER = re.compile(r"call|facetime|notification|telephony|conversation", re.I)
+
+
+def anrufprozesse_durchsuchen() -> list:
+    """Durchsucht die Fenster aller Prozesse, deren Name nach Anrufen oder Mitteilungen klingt."""
+    import ApplicationServices
+
+    liste = subprocess.run(["/bin/ps", "-axo", "pid=,comm="], capture_output=True, text=True).stdout
+    funde = []
+    for zeile in liste.splitlines():
+        pid, _, befehl = zeile.strip().partition(" ")
+        name = befehl.rsplit("/", 1)[-1]
+        if not ANRUF_PROZESS_MUSTER.search(name):
+            continue
+        programm = ApplicationServices.AXUIElementCreateApplication(int(pid))
+        for fenster in _ax(programm, ApplicationServices.kAXWindowsAttribute) or []:
+            knoepfe, texte = [], []
+            _ax_sammeln(fenster, knoepfe, texte)
+            if knoepfe or texte:
+                print(f"Prozess {name} ({pid}): Knöpfe {[k for k, _, _ in knoepfe]} Texte {texte[:4]}")
+            funde += knoepfe
+    return funde
+
+
+def anruf_umfassend_suchen() -> list:
+    """Alle bekannten Wege zusammen: Abtasten jeder Anruf-Mitteilung, dann die Anruf-Prozesse."""
+    funde = []
+    for _, _, _, mitteilungen in _anruf_fenster():
+        for mitteilung in mitteilungen:
+            funde += mitteilung_abtasten(mitteilung)
+    return funde + anrufprozesse_durchsuchen()
+
+
 def _knopf_suchen_und_druecken(beschriftungen: tuple) -> str:
     import ApplicationServices
 
@@ -2218,6 +2300,12 @@ def anruf_knopf_druecken(beschriftungen: tuple) -> str:
     gedrueckt = _knopf_suchen_und_druecken(beschriftungen)
     if gedrueckt:
         return gedrueckt
+    for beschriftung, element, aktion in anruf_umfassend_suchen():
+        if beschriftung in beschriftungen:  # nur ausdrücklich passend benannte Elemente, nie raten
+            fehler = ApplicationServices.AXUIElementPerformAction(element, aktion)
+            print(f"Anruf: drücke {beschriftung!r} aus der umfassenden Suche ({aktion.splitlines()[0]}), "
+                  f"Ergebnis {fehler}")
+            return beschriftung
     for _, _, _, mitteilungen in _anruf_fenster():
         for mitteilung in mitteilungen:
             fehler, aktionen = ApplicationServices.AXUIElementCopyActionNames(mitteilung, None)
@@ -2300,6 +2388,19 @@ def fenster_aufbau_protokollieren() -> None:
                 print(f"Aufbau {name}, Fenster {nummer}:\n" + "\n".join(ax_baum(fenster)))
 
 
+def _klingeln_beginnt(fenster: list) -> None:
+    """Erstes Klingeln: einmal umfassend suchen (nur fürs Log), dann den Anrufer ansagen."""
+    try:
+        anruf_umfassend_suchen()
+    except Exception as fehler:  # Diagnose darf die Ansage nicht verhindern
+        print(f"Anruf-Diagnose: {fehler}", file=sys.stderr)
+    texte = next(ts for _, ks, ts in fenster if set(ks) & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
+    ANRUF["anrufer"] = anrufer_aus(texte) if texte else ""
+    ansage = f"Anruf von {ANRUF['anrufer']}" if ANRUF["anrufer"] not in ("", "unbekannt") else "Eingehender Anruf"
+    melde_status(ansage)
+    sprich(f"{ansage}.")
+
+
 def anruf_pruefen() -> None:
     """Ein Durchgang der Anrufüberwachung: Klingeln ansagen, nach dem Gespräch fortsetzen."""
     fenster = anrufanzeige()
@@ -2309,11 +2410,7 @@ def anruf_pruefen() -> None:
     if klingelt:
         anruf_mitteilung_protokollieren()
     if klingelt and not ANRUF["klingelt"]:
-        texte = next(ts for _, ks, ts in fenster if set(ks) & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
-        ANRUF["anrufer"] = anrufer_aus(texte) if texte else ""
-        ansage = f"Anruf von {ANRUF['anrufer']}" if ANRUF["anrufer"] not in ("", "unbekannt") else "Eingehender Anruf"
-        melde_status(ansage)
-        sprich(f"{ansage}.")
+        _klingeln_beginnt(fenster)
     if not klingelt:
         _diagnose["mitteilung_protokolle"] = 0
     ANRUF["klingelt"] = klingelt
