@@ -164,6 +164,8 @@ es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.
 
 - Für den älteren Verlauf zusätzlich „Nachrichten in iCloud“ auf iPhone und Mac einschalten.
 - Senden: heute nur als iMessage. Geplant: erst iMessage, sonst SMS.
-- Vorlesen (geplant): heyAtlas liest die Nachrichten-Datenbank `~/Library/Messages/chat.db`. Dafür braucht es
-  **Festplattenvollzugriff** (Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff → heyAtlas).
-  Diese Berechtigung erlaubt das Lesen aller Dateien; heyAtlas öffnet nur die Nachrichten-Datenbank.
+- Vorlesen (geplant, **optional und standardmäßig aus**): Schalter „Nachrichten vorlesen“ im Einstellungsmenü.
+  Erst dann liest heyAtlas die Nachrichten-Datenbank `~/Library/Messages/chat.db`. Dafür braucht es
+  **Festplattenvollzugriff** (Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff → heyAtlas),
+  den man selbst erteilt; eine App kann ihn nicht abfragen. Diese Berechtigung erlaubt das Lesen aller Dateien;
+  heyAtlas öffnet nur die Nachrichten-Datenbank. Beim Ausschalten den Festplattenvollzugriff wieder entziehen.
