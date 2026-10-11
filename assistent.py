@@ -90,9 +90,12 @@ natürlich aus, etwa "um halb drei" oder "um 14 Uhr".
 Musik spielst du über Spotify, außer der Nutzer nennt ausdrücklich Apple Music. Für aktuelle Fakten, die kein anderes
 Werkzeug liefert, nutze die Websuche; nenne danach nur das Wichtigste in ein bis zwei Sätzen, ohne Quellen.
 Mails und Nachrichten verschickst du nur, wenn der Nutzer es ausdrücklich will; sonst legst du einen Entwurf an.
+Soll eine Mail vorgelesen werden, nenne Absender und Betreff und gib dann den Text von mail_vorlesen wörtlich
+wieder; das ist die Ausnahme von der Regel mit den kurzen Antworten.
 Sagt der Nutzer "Guten Morgen" oder bittet um ein Briefing, hole parallel das Wetter, die Termine von heute, die
-Wecker und die Nachrichten und fasse alles in drei bis vier Sätzen zusammen, Nachrichten nur mit den zwei
-wichtigsten Schlagzeilen."""
+Wecker, die Nachrichten und die ungelesenen Mails und fasse alles in vier bis fünf Sätzen zusammen: Nachrichten nur
+mit den zwei wichtigsten Schlagzeilen, Mails in einem einzigen Satz mit ihrer Anzahl und knapp den Betreffs der
+höchstens drei neuesten, ohne Inhalte."""
 
 SCHLUESSELBUND_DIENST = "anthropic-api-key"
 
@@ -1191,47 +1194,123 @@ end run""", adressen[0], text)
 
 _letzte_mails: dict = {}  # Kennung M1… -> Mail-ID im Posteingang
 
-
-@beta_tool
-def mails_lesen(anzahl: int = 10) -> str:
-    """Liest ungelesene Mails im Posteingang (Absender, Betreff, Datum, Anfang des Textes). Kennungen wie M1
-    dienen zum Antworten.
-
-    Args:
-        anzahl: Höchstens so viele Mails, neueste zuerst.
-    """
-    roh = osascript("""on run argv
+# Stufe 1: alle passenden Mails ohne Text (schnell); argv: Absender, Betreff, nur ungelesen (1/0), Datum (5 Teile).
+# Absender und Betreff werden im Skript gefiltert: AppleScripts "contains" ignoriert Groß- und Kleinschreibung.
+# Achtung: In AppleScript ist 'x contains ""' falsch, leere Filter werden deshalb ausdrücklich übersprungen.
+MAIL_LISTE = DATUM_HELFER + """
+on run argv
     set feld to character id 31
     set satz to character id 30
+    set seit to mkdate(item 4 of argv, item 5 of argv, item 6 of argv, item 7 of argv, item 8 of argv)
     set ausgabe to ""
-    set anzahl to 0
     tell application "Mail"
-        repeat with m in (messages of inbox whose read status is false)
-            set inhalt to content of m
-            if (length of inhalt) > 400 then set inhalt to text 1 thru 400 of inhalt
-            set ausgabe to ausgabe & (id of m) & feld & (sender of m) & feld & (subject of m) & feld & ¬
-                ((date received of m) as «class isot» as string) & feld & inhalt & satz
-            set anzahl to anzahl + 1
-            if anzahl ≥ (item 1 of argv as integer) then exit repeat
+        if (item 3 of argv) is "1" then
+            set kandidaten to (messages of inbox whose read status is false and date received ≥ seit)
+        else
+            set kandidaten to (messages of inbox whose date received ≥ seit)
+        end if
+        repeat with m in kandidaten
+            set absender to sender of m
+            set betreff to subject of m
+            if ((item 1 of argv) is "" or absender contains (item 1 of argv)) and ¬
+                ((item 2 of argv) is "" or betreff contains (item 2 of argv)) then
+                set ausgabe to ausgabe & (id of m) & feld & absender & feld & betreff & feld & ¬
+                    ((date received of m) as «class isot» as string) & feld & (read status of m) & satz
+            end if
         end repeat
     end tell
     return ausgabe
-end run""", str(max(1, min(anzahl, 25))))
-    mails = [s.split("\x1f") for s in roh.split("\x1e") if s.count("\x1f") == 4]
+end run"""
+
+# Stufe 2: Text einer Mail; argv: Mail-ID, Länge (0 = ganz), als gelesen markieren (1/0)
+MAIL_TEXT = """on run argv
+    tell application "Mail"
+        set m to first message of inbox whose id is ((item 1 of argv) as integer)
+        set inhalt to content of m
+        set laenge to (item 2 of argv) as integer
+        if laenge > 0 and (length of inhalt) > laenge then set inhalt to text 1 thru laenge of inhalt
+        if (item 3 of argv) is "1" then set read status of m to true
+        return inhalt
+    end tell
+end run"""
+
+# Ab hier beginnt bei Antworten meist der zitierte Verlauf, der beim Vorlesen nur stört
+ZITAT_BEGINN = re.compile(r"^(>|Am .+ schrieb .+:|On .+ wrote:|-{2,} ?(Ursprüngliche|Original) )", re.M)
+
+
+def mails_abfragen(absender: str = "", betreff: str = "", nur_ungelesen: bool = False,
+                   seit_tagen: int = 7, anzahl: int = 10) -> str:
+    """Gemeinsame Abfrage für mails_lesen und mails_suchen: neueste zuerst, mit Kennungen M1, M2 …"""
+    seit = (datetime.now() - timedelta(days=max(0, seit_tagen))).replace(hour=0, minute=0, second=0, microsecond=0)
+    roh = osascript(MAIL_LISTE, absender, betreff, "1" if nur_ungelesen else "0", *datum_teile(seit.isoformat()))
+    mails = [z.split("\x1f") for z in roh.split("\x1e") if z.count("\x1f") == 4]
     mails.sort(key=lambda m: m[3], reverse=True)
     _letzte_mails.clear()
     zeilen = []
-    for nummer, (mail_id, absender, betreff, datum, inhalt) in enumerate(mails, 1):
+    for nummer, (mail_id, von, titel, datum, gelesen) in enumerate(mails[:max(1, min(anzahl, 25))], 1):
         _letzte_mails[f"M{nummer}"] = mail_id
-        inhalt = " ".join(inhalt.split())
-        zeilen.append(f"[M{nummer}] {datum[:16].replace('T', ' ')} | von {absender} | {betreff}\n    {inhalt}")
-    return "\n".join(zeilen) or "Keine ungelesenen Mails."
+        anfang = " ".join(osascript(MAIL_TEXT, mail_id, "300", "0").split())
+        markierung = "" if gelesen == "true" else " | ungelesen"
+        wann = datum[:16].replace("T", " ")
+        zeilen.append(f"[M{nummer}] {wann} | von {von} | {titel}{markierung}\n    {anfang}")
+    if len(mails) > len(zeilen):
+        zeilen.append(f"(insgesamt {len(mails)} Treffer, gezeigt die {len(zeilen)} neuesten)")
+    return "\n".join(zeilen)
+
+
+@beta_tool
+def mails_lesen(anzahl: int = 10) -> str:
+    """Liest ungelesene Mails im Posteingang der letzten 30 Tage (Absender, Betreff, Datum, Anfang des Textes),
+    neueste zuerst. Kennungen wie M1 dienen zum Vorlesen und Antworten.
+
+    Args:
+        anzahl: Höchstens so viele Mails.
+    """
+    return mails_abfragen(nur_ungelesen=True, seit_tagen=30, anzahl=anzahl) or "Keine ungelesenen Mails."
+
+
+@beta_tool
+def mails_suchen(absender: Optional[str] = None, betreff: Optional[str] = None, seit_tagen: int = 7,
+                 nur_ungelesen: bool = False, anzahl: int = 10) -> str:
+    """Sucht Mails im Posteingang, auch bereits gelesene, neueste zuerst. Kennungen wie M1 dienen zum Vorlesen
+    und Antworten.
+
+    Args:
+        absender: Teil von Name oder Adresse des Absenders, z. B. "Bank" oder "anna@".
+        betreff: Teil des Betreffs, z. B. "Rechnung".
+        seit_tagen: Zeitraum in Tagen bis heute, z. B. 7 für die letzte Woche.
+        nur_ungelesen: Nur ungelesene Mails.
+        anzahl: Höchstens so viele Mails.
+    """
+    ergebnis = mails_abfragen(absender or "", betreff or "", nur_ungelesen, seit_tagen, anzahl)
+    return ergebnis or "Keine passenden Mails gefunden."
+
+
+@beta_tool
+def mail_vorlesen(kennung: str) -> str:
+    """Liefert den ganzen Text einer zuvor gelesenen oder gesuchten Mail zum Vorlesen, ohne zitierten Verlauf,
+    und markiert sie als gelesen.
+
+    Args:
+        kennung: Kennung aus mails_lesen oder mails_suchen, z. B. M2.
+    """
+    mail_id = _letzte_mails.get(kennung.strip().upper())
+    if mail_id is None:
+        return f"Unbekannte Kennung {kennung}. Hol die Mails zuerst mit mails_lesen oder mails_suchen."
+    text = osascript(MAIL_TEXT, mail_id, "0", "1")
+    zitat = ZITAT_BEGINN.search(text)
+    if zitat:
+        text = text[:zitat.start()]
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) > 3000:
+        return text[:3000] + "\n[… gekürzt, die Mail ist länger. Frag, ob du den Rest zusammenfassen sollst.]"
+    return text or "Die Mail enthält keinen Text."
 
 
 @beta_tool
 def mail_antworten(kennung: str, text: str, senden: bool = False) -> str:
-    """Antwortet auf eine mit mails_lesen gelesene Mail. Standard ist ein Entwurf, der offen in Mail liegt;
-    mit senden=True wird nach Rückfrage per Sprache sofort gesendet.
+    """Antwortet auf eine mit mails_lesen oder mails_suchen gefundene Mail. Standard ist ein Entwurf, der offen
+    in Mail liegt; mit senden=True wird nach Rückfrage per Sprache sofort gesendet.
 
     Args:
         kennung: Kennung aus mails_lesen, z. B. M2.
@@ -1542,7 +1621,7 @@ WERKZEUGE = [erinnerung_anlegen, erinnerungen_lesen, erinnerung_abhaken,
              spotify_abspielen, spotify_steuern, spotify_aktueller_titel, wetter, nachrichten,
              timer_stellen, timer_abfragen, timer_abbrechen, klingeln_stoppen,
              wecker_stellen, wecker_auflisten, wecker_loeschen,
-             mails_lesen, mail_antworten, mail_schreiben,
+             mails_lesen, mails_suchen, mail_vorlesen, mail_antworten, mail_schreiben,
              lautstaerke, app_oeffnen, app_beenden, dunkelmodus, bildschirm_sperren,
              apple_music_abspielen, apple_music_steuern, youtube_abspielen, youtube_steuern,
              notiz_anlegen, notizen_suchen, nachricht_senden, kurzbefehle_auflisten, kurzbefehl_ausfuehren]

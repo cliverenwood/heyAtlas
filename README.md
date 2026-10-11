@@ -60,11 +60,12 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 - `wecker_stellen`, `wecker_auflisten`, `wecker_loeschen`: einmalig oder an Wochentagen, gespeichert in `~/Library/Application Support/heyAtlas/wecker.json`
 - `klingeln_stoppen`: schaltet Wecker und Timer aus; im Sprachmodus reicht auch einfach „Hey Atlas“
 - `erinnerungen_lesen`, `erinnerung_abhaken`: offene Erinnerungen (z. B. Einkaufsliste) lesen und abhaken; `erinnerung_anlegen` kann eine Liste wählen
-- `mails_lesen`, `mail_antworten`, `mail_schreiben`: ungelesene Mails, Antworten und neue Mails als offener Entwurf; Senden nur auf ausdrücklichen Wunsch mit Rückfrage
+- `mails_lesen`, `mails_suchen`, `mail_vorlesen`: ungelesene Mails, Suche nach Absender, Betreff und Zeitraum (auch gelesene), ganze Mail vorlesen ohne zitierten Verlauf (markiert sie als gelesen); nur Posteingang
+- `mail_antworten`, `mail_schreiben`: Antworten und neue Mails als offener Entwurf; Senden nur auf ausdrücklichen Wunsch mit Rückfrage
 - `lautstaerke`, `app_oeffnen`, `app_beenden`, `dunkelmodus`, `bildschirm_sperren`: Mac-Steuerung
 - `apple_music_abspielen`, `apple_music_steuern`: eigene Mediathek in der Musik-App (Streaming-Katalog ist per AppleScript nicht erreichbar)
 - `youtube_abspielen`, `youtube_steuern`: Suche über die YouTube Data API, Wiedergabe im Browser
-- `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Weckern und Nachrichten
+- `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Weckern, Nachrichten und ungelesenen Mails (nur Anzahl und Betreffs)
 - Websuche: Claudes eingebaute Websuche für aktuelle Fragen
 - `wetter`: aktuelles Wetter und bis zu 7 Tage Vorhersage von Open-Meteo (kostenlos, ohne Schlüssel)
 
