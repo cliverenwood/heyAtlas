@@ -2105,6 +2105,8 @@ AUFLEGEN = ("Beenden", "Auflegen", "End", "Leave")
 # Direkt über die Bedienungshilfen-Schnittstelle statt per AppleScript: Bei AppleScript prüft macOS die
 # Berechtigung von osascript statt von heyAtlas ("osascript is not allowed assistive access", -25211).
 ANRUF_APPS = {"com.apple.notificationcenterui": "NotificationCenter", "com.apple.FaceTime": "FaceTime"}
+# So kennzeichnet macOS 26 die Anruf-Mitteilung (aus dem Log eines echten Anrufs); ihr Inhalt erscheint verzögert
+ANRUF_KENNUNG = "FACETIME_NOTIFICATION"
 AX_KEIN_ZUGRIFF = -25211
 
 
@@ -2133,12 +2135,16 @@ def _ax_aktionen(element) -> list:
     return aktionen
 
 
-def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0) -> None:
-    """Knöpfe (Beschriftung, Element, Aktion) und Texte eines Fensters; Tiefe und Menge begrenzt."""
+def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0, mitteilungen: Optional[list] = None) -> None:
+    """Knöpfe (Beschriftung, Element, Aktion) und Texte eines Fensters, Anruf-Mitteilungen in mitteilungen;
+    Tiefe und Menge begrenzt."""
     import ApplicationServices
 
     if tiefe > 12 or len(knoepfe) + len(texte) > 300:
         return
+    if mitteilungen is not None and ANRUF_KENNUNG in (str(_ax(element, ApplicationServices.kAXIdentifierAttribute)),
+                                                      str(_ax(element, ApplicationServices.kAXDescriptionAttribute))):
+        mitteilungen.append(element)
     rolle = _ax(element, ApplicationServices.kAXRoleAttribute)
     if rolle == "AXButton":
         # Bei Mitteilungen steht die Beschriftung oft nur in der Beschreibung, der Titel ist leer
@@ -2150,7 +2156,7 @@ def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0) -> None:
         texte.append(str(_ax(element, ApplicationServices.kAXValueAttribute)))
     knoepfe += [(beschriftung, element, aktion) for beschriftung, aktion in _ax_aktionen(element)]
     for kind in _ax(element, ApplicationServices.kAXChildrenAttribute) or []:
-        _ax_sammeln(kind, knoepfe, texte, tiefe + 1)
+        _ax_sammeln(kind, knoepfe, texte, tiefe + 1, mitteilungen)
 
 
 def ax_baum(element, tiefe: int = 0, zeilen: Optional[list] = None) -> list:
@@ -2175,7 +2181,8 @@ def ax_baum(element, tiefe: int = 0, zeilen: Optional[list] = None) -> list:
 
 
 def _anruf_fenster() -> list:
-    """[(Prozess, [(Beschriftung, Element, Aktion)], [Texte])] aller Fenster von Mitteilungen und FaceTime."""
+    """[(Prozess, [(Beschriftung, Element, Aktion)], [Texte], [Anruf-Mitteilungen])] aller Fenster von
+    Mitteilungen und FaceTime mit Knöpfen oder einer Anruf-Mitteilung."""
     import ApplicationServices
     from AppKit import NSRunningApplication
 
@@ -2184,22 +2191,43 @@ def _anruf_fenster() -> list:
         for app in NSRunningApplication.runningApplicationsWithBundleIdentifier_(kennung):
             programm = ApplicationServices.AXUIElementCreateApplication(app.processIdentifier())
             for fenster in _ax(programm, ApplicationServices.kAXWindowsAttribute) or []:
-                knoepfe, texte = [], []
-                _ax_sammeln(fenster, knoepfe, texte)
-                if knoepfe:
-                    ergebnis.append((name, knoepfe, texte))
+                knoepfe, texte, mitteilungen = [], [], []
+                _ax_sammeln(fenster, knoepfe, texte, mitteilungen=mitteilungen)
+                if knoepfe or mitteilungen:
+                    ergebnis.append((name, knoepfe, texte, mitteilungen))
     return ergebnis
 
 
-def anruf_knopf_druecken(beschriftungen: tuple) -> str:
-    """Drückt den ersten Knopf mit einer der Beschriftungen; liefert die Beschriftung oder "" """
+def _knopf_suchen_und_druecken(beschriftungen: tuple) -> str:
     import ApplicationServices
 
-    for _, knoepfe, _ in _anruf_fenster():
+    for _, knoepfe, _, _ in _anruf_fenster():
         for beschriftung, element, aktion in knoepfe:
             if beschriftung in beschriftungen:
-                ApplicationServices.AXUIElementPerformAction(element, aktion)
+                fehler = ApplicationServices.AXUIElementPerformAction(element, aktion)
+                print(f"Anruf: drücke {beschriftung!r} ({aktion.splitlines()[0]}), Ergebnis {fehler}")
                 return beschriftung
+    return ""
+
+
+def anruf_knopf_druecken(beschriftungen: tuple) -> str:
+    """Drückt den ersten Knopf mit einer der Beschriftungen; liefert die Beschriftung oder "".
+    Findet sich keiner, wird die Anruf-Mitteilung selbst angeklickt (öffnet die Anrufansicht) und erneut gesucht."""
+    import ApplicationServices
+
+    gedrueckt = _knopf_suchen_und_druecken(beschriftungen)
+    if gedrueckt:
+        return gedrueckt
+    for _, _, _, mitteilungen in _anruf_fenster():
+        for mitteilung in mitteilungen:
+            fehler, aktionen = ApplicationServices.AXUIElementCopyActionNames(mitteilung, None)
+            print(f"Anruf: kein Knopf {beschriftungen}, Aktionen der Mitteilung: {aktionen} (Fehler {fehler})")
+            if fehler == 0 and aktionen and "AXPress" in aktionen:
+                print("Anruf: klicke die Mitteilung an")
+                ApplicationServices.AXUIElementPerformAction(mitteilung, "AXPress")
+                time.sleep(1.0)
+                fenster_aufbau_protokollieren()
+                return _knopf_suchen_und_druecken(beschriftungen)
     return ""
 
 
@@ -2208,7 +2236,9 @@ ANRUF = {"klingelt": False, "anrufer": "", "pausiert_seit": 0.0, "auflegen_geseh
 
 def anrufanzeige() -> list:
     """[(Prozess, [Knopfbeschriftungen], [Texte])] aller Fenster der Anrufanzeige mit Knöpfen."""
-    return [(prozess, [b for b, _, _ in knoepfe], texte) for prozess, knoepfe, texte in _anruf_fenster()]
+    # Eine Anruf-Mitteilung erscheint als Pseudo-Knopf ANRUF_KENNUNG, auch wenn ihr Inhalt noch fehlt
+    return [(prozess, [b for b, _, _ in knoepfe] + [ANRUF_KENNUNG] * bool(mitteilungen), texte)
+            for prozess, knoepfe, texte, mitteilungen in _anruf_fenster()]
 
 
 def anrufer_aus(texte: list) -> str:
@@ -2219,7 +2249,24 @@ def anrufer_aus(texte: list) -> str:
     return "unbekannt"
 
 
-_diagnose = {"anzeige": None, "besitzer": None}
+_diagnose = {"anzeige": None, "besitzer": None, "mitteilung_protokolle": 0}
+
+
+def anruf_mitteilung_protokollieren() -> None:
+    """Solange die Anruf-Mitteilung sichtbar ist, ihren Aufbau die ersten fünf Male ins Log schreiben: Ihr Inhalt
+    erscheint erst nach und nach. Mit allen Eigenschaften und Aktionen, für die Diagnose."""
+    import ApplicationServices
+
+    if _diagnose["mitteilung_protokolle"] >= 5:
+        return
+    _diagnose["mitteilung_protokolle"] += 1
+    for _, _, _, mitteilungen in _anruf_fenster():
+        for mitteilung in mitteilungen:
+            _, eigenschaften = ApplicationServices.AXUIElementCopyAttributeNames(mitteilung, None)
+            fehler, aktionen = ApplicationServices.AXUIElementCopyActionNames(mitteilung, None)
+            print(f"Anruf-Mitteilung ({_diagnose['mitteilung_protokolle']}/5): Eigenschaften "
+                  f"{list(eigenschaften or [])}, Aktionen {list(aktionen or [])} (Fehler {fehler})\n"
+                  + "\n".join(ax_baum(mitteilung)))
 
 
 def anruf_diagnose(fenster: list) -> None:
@@ -2258,12 +2305,17 @@ def anruf_pruefen() -> None:
     fenster = anrufanzeige()
     anruf_diagnose(fenster)
     knoepfe = {k for _, ks, _ in fenster for k in ks}
-    klingelt = bool(knoepfe & set(ANNEHMEN))
+    klingelt = bool(knoepfe & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
+    if klingelt:
+        anruf_mitteilung_protokollieren()
     if klingelt and not ANRUF["klingelt"]:
-        texte = next(ts for _, ks, ts in fenster if set(ks) & set(ANNEHMEN))
-        ANRUF["anrufer"] = anrufer_aus(texte)
-        melde_status(f"Anruf von {ANRUF['anrufer']}")
-        sprich(f"Anruf von {ANRUF['anrufer']}.")
+        texte = next(ts for _, ks, ts in fenster if set(ks) & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
+        ANRUF["anrufer"] = anrufer_aus(texte) if texte else ""
+        ansage = f"Anruf von {ANRUF['anrufer']}" if ANRUF["anrufer"] not in ("", "unbekannt") else "Eingehender Anruf"
+        melde_status(ansage)
+        sprich(f"{ansage}.")
+    if not klingelt:
+        _diagnose["mitteilung_protokolle"] = 0
     ANRUF["klingelt"] = klingelt
     if ANRUF["pausiert_seit"]:  # Gespräch läuft, von Atlas pausiert
         if knoepfe & set(AUFLEGEN):
@@ -2547,9 +2599,25 @@ def _schnell_timer_stellen(t: str) -> Optional[str]:
     return None
 
 
+def _schnell_anruf(t: str) -> Optional[str]:
+    """Solange es klingelt: jeder Satz mit Ablehnen-Wörtern lehnt ab, jeder mit „Anruf“ oder „annehmen“ nimmt an.
+    So klappt es auch, wenn die Spracherkennung „Dann den Anruf an“ statt „Nimm den Anruf an“ versteht."""
+    if not ANRUF["klingelt"]:
+        return None
+    woerter = set(t.split())
+    if woerter & {"ablehnen", "lehn", "weg", "wegdrücken", "nicht", "nein"}:
+        return anruf_ablehnen()
+    if "anruf" in t or woerter & {"annehmen", "abnehmen", "ran", "an"}:
+        return anruf_annehmen()
+    return None
+
+
 def schnellbefehl(text: str) -> Optional[str]:
     """Antwort für einen bekannten Kurzbefehl, oder None, wenn Claude übernehmen soll."""
     t = normalisiere(text)
+    anruf = _schnell_anruf(t)
+    if anruf is not None:
+        return anruf
     art = next((a for a, saetze in SCHNELL_TEXTE.items() if t in saetze), None)
     if art:
         return SCHNELL_AKTIONEN[art]()
