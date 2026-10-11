@@ -2117,8 +2117,24 @@ def _ax(element, attribut):
     return wert if fehler == 0 else None
 
 
+def _ax_aktionen(element) -> list:
+    """Benannte Aktionen eines Elements als [(Beschriftung, Aktionsname)]. Mitteilungen stellen ihre Knöpfe oft so
+    bereit statt als echte Knöpfe, im Format "Name:Annehmen\nTarget:0x0\nSelector:(null)"."""
+    import ApplicationServices
+
+    fehler, namen = ApplicationServices.AXUIElementCopyActionNames(element, None)
+    if fehler == AX_KEIN_ZUGRIFF:
+        raise RuntimeError(f"Bedienungshilfen fehlen ({AX_KEIN_ZUGRIFF})")
+    aktionen = []
+    for name in (namen or []) if fehler == 0 else []:
+        treffer = re.match(r"Name:(.+)", str(name))
+        if treffer:
+            aktionen.append((treffer.group(1).strip(), str(name)))
+    return aktionen
+
+
 def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0) -> None:
-    """Knöpfe (Beschriftung, Element) und Texte eines Fensters; Tiefe und Menge begrenzt."""
+    """Knöpfe (Beschriftung, Element, Aktion) und Texte eines Fensters; Tiefe und Menge begrenzt."""
     import ApplicationServices
 
     if tiefe > 12 or len(knoepfe) + len(texte) > 300:
@@ -2129,15 +2145,37 @@ def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0) -> None:
         beschriftung = (_ax(element, ApplicationServices.kAXTitleAttribute)
                         or _ax(element, ApplicationServices.kAXDescriptionAttribute))
         if beschriftung:
-            knoepfe.append((str(beschriftung), element))
+            knoepfe.append((str(beschriftung), element, ApplicationServices.kAXPressAction))
     elif rolle == "AXStaticText" and _ax(element, ApplicationServices.kAXValueAttribute):
         texte.append(str(_ax(element, ApplicationServices.kAXValueAttribute)))
+    knoepfe += [(beschriftung, element, aktion) for beschriftung, aktion in _ax_aktionen(element)]
     for kind in _ax(element, ApplicationServices.kAXChildrenAttribute) or []:
         _ax_sammeln(kind, knoepfe, texte, tiefe + 1)
 
 
+def ax_baum(element, tiefe: int = 0, zeilen: Optional[list] = None) -> list:
+    """Aufbau eines Fensters als Textzeilen fürs Log (Diagnose der Anrufanzeige)."""
+    import ApplicationServices as A  # noqa: N812 - nur hier, für kurze Zeilen
+
+    zeilen = [] if zeilen is None else zeilen
+    if tiefe > 15 or len(zeilen) > 250:
+        return zeilen
+    werte = {name: _ax(element, attribut) for name, attribut in (
+        ("rolle", A.kAXRoleAttribute), ("unterrolle", A.kAXSubroleAttribute), ("titel", A.kAXTitleAttribute),
+        ("beschreibung", A.kAXDescriptionAttribute), ("wert", A.kAXValueAttribute),
+        ("kennung", A.kAXIdentifierAttribute))}
+    fehler, aktionen = A.AXUIElementCopyActionNames(element, None)
+    teile = [f"{k}={str(v)[:60]!r}" for k, v in werte.items() if v not in (None, "")]
+    if fehler == 0 and aktionen:
+        teile.append(f"aktionen={[str(a).splitlines()[0] for a in aktionen]}")
+    zeilen.append("  " * tiefe + " ".join(teile))
+    for kind in _ax(element, A.kAXChildrenAttribute) or []:
+        ax_baum(kind, tiefe + 1, zeilen)
+    return zeilen
+
+
 def _anruf_fenster() -> list:
-    """[(Prozess, [(Beschriftung, Element)], [Texte])] aller Fenster von Mitteilungen und FaceTime mit Knöpfen."""
+    """[(Prozess, [(Beschriftung, Element, Aktion)], [Texte])] aller Fenster von Mitteilungen und FaceTime."""
     import ApplicationServices
     from AppKit import NSRunningApplication
 
@@ -2158,9 +2196,9 @@ def anruf_knopf_druecken(beschriftungen: tuple) -> str:
     import ApplicationServices
 
     for _, knoepfe, _ in _anruf_fenster():
-        for beschriftung, element in knoepfe:
+        for beschriftung, element, aktion in knoepfe:
             if beschriftung in beschriftungen:
-                ApplicationServices.AXUIElementPerformAction(element, ApplicationServices.kAXPressAction)
+                ApplicationServices.AXUIElementPerformAction(element, aktion)
                 return beschriftung
     return ""
 
@@ -2170,7 +2208,7 @@ ANRUF = {"klingelt": False, "anrufer": "", "pausiert_seit": 0.0, "auflegen_geseh
 
 def anrufanzeige() -> list:
     """[(Prozess, [Knopfbeschriftungen], [Texte])] aller Fenster der Anrufanzeige mit Knöpfen."""
-    return [(prozess, [b for b, _ in knoepfe], texte) for prozess, knoepfe, texte in _anruf_fenster()]
+    return [(prozess, [b for b, _, _ in knoepfe], texte) for prozess, knoepfe, texte in _anruf_fenster()]
 
 
 def anrufer_aus(texte: list) -> str:
@@ -2199,7 +2237,20 @@ def anruf_diagnose(fenster: list) -> None:
         return
     if _diagnose["besitzer"] is not None and besitzer - _diagnose["besitzer"]:
         print(f"Neue Fenster von: {sorted(besitzer - _diagnose['besitzer'])}")
+        if (besitzer - _diagnose["besitzer"]) & {"Notification Center", "FaceTime"}:
+            fenster_aufbau_protokollieren()
     _diagnose["besitzer"] = besitzer
+
+
+def fenster_aufbau_protokollieren() -> None:
+    import ApplicationServices
+    from AppKit import NSRunningApplication
+
+    for kennung, name in ANRUF_APPS.items():
+        for app in NSRunningApplication.runningApplicationsWithBundleIdentifier_(kennung):
+            programm = ApplicationServices.AXUIElementCreateApplication(app.processIdentifier())
+            for nummer, fenster in enumerate(_ax(programm, ApplicationServices.kAXWindowsAttribute) or []):
+                print(f"Aufbau {name}, Fenster {nummer}:\n" + "\n".join(ax_baum(fenster)))
 
 
 def anruf_pruefen() -> None:

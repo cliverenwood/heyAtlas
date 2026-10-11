@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 
-VERSION=0.3.1
+VERSION=0.3.2
 BUILD=$(date +%Y%m%d%H%M)
 VENV=.venv312
 APP=build/heyAtlas.app
@@ -45,8 +45,14 @@ cp assets/icons/out/HeyAtlas.icns $INHALT/Resources/
 $VENV/bin/python -m compileall -q $INHALT/Resources/app >/dev/null
 
 echo "▶ Signatur (lokal, ohne Apple-Entwicklerkonto)"
-codesign --force --deep --sign - $APP
+# Mit dem selbst erstellten Zertifikat "heyAtlas lokal" bleibt die Kennung über Neubauten gleich und macOS behält
+# erteilte Berechtigungen (Festplattenvollzugriff, Bedienungshilfen). Ohne Zertifikat: einfache lokale Signatur,
+# dann gelten Berechtigungen nach jedem Neubau nicht mehr. Zertifikat anlegen: siehe README, Abschnitt Signatur.
+if security find-identity -p codesigning | grep -q '"heyAtlas lokal"'; then IDENTITAET="heyAtlas lokal"; else IDENTITAET="-"; fi
+echo "  Identität: $IDENTITAET"
+codesign --force --deep --sign "$IDENTITAET" $APP
 codesign --verify --deep --strict $APP
+codesign -d -r- $APP 2>&1 | tail -1
 
 echo "▶ DMG"
 DMG=build/heyAtlas-$VERSION.dmg

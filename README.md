@@ -185,3 +185,32 @@ klingeln. Während eines Gesprächs hört Atlas nicht auf das Aktivierungswort.
   - Mac → FaceTime → Einstellungen → **Anrufe vom iPhone**
 - Hängt am Aufbau der Anrufanzeige; nach macOS-Updates kann eine Anpassung nötig sein. Erkennt Atlas nach dem
   Annehmen die Gesprächssteuerung nicht, bleibt er pausiert, bis man im Menü „Fortsetzen“ wählt.
+
+## Signatur
+
+Ohne Apple-Entwicklerkonto signiert `packaging/build.sh` mit einem selbst erstellten Zertifikat **„heyAtlas lokal“**
+im Anmelde-Schlüsselbund. Damit erkennt macOS heyAtlas über Neubauten hinweg wieder, und Berechtigungen wie
+Festplattenvollzugriff und Bedienungshilfen bleiben erhalten. Fehlt das Zertifikat, signiert das Skript nur
+einfach lokal; dann muss man diese Berechtigungen nach jedem Neubau neu erteilen.
+
+Zertifikat anlegen (einmalig; „-T /usr/bin/codesign“ erlaubt nur codesign die Nutzung des Schlüssels):
+
+```sh
+cat > zert.cnf <<'ENDE'
+[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = ext
+[dn]
+CN = heyAtlas lokal
+[ext]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, codeSigning
+ENDE
+openssl req -x509 -newkey rsa:2048 -nodes -keyout schluessel.pem -out zert.pem -days 3650 -config zert.cnf
+PW=$(openssl rand -hex 16)
+openssl pkcs12 -export -inkey schluessel.pem -in zert.pem -name "heyAtlas lokal" -out zert.p12 -passout pass:$PW
+security import zert.p12 -k ~/Library/Keychains/login.keychain-db -P "$PW" -T /usr/bin/codesign
+rm schluessel.pem zert.p12
+```
