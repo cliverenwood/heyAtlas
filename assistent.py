@@ -37,9 +37,10 @@ WHISPER_MODELL = os.environ.get("WHISPER_MODELL", "mlx-community/whisper-small-m
 ABTASTRATE = 16000
 
 # Pfad zu einer .onnx-Datei oder ein mitgeliefertes openWakeWord-Modell (hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
-# Standard ist das selbst trainierte "Hey Atlas"; fehlt die Datei, bleibt "Hey Jarvis" als Rückfall.
+# Standard bleibt "Hey Jarvis": Das erste selbst trainierte "Hey Atlas" erkannte die echte Stimme des
+# Nutzers kaum (Höchstwert 0,10 bei Schwelle 0,5). Auswählbar ist es trotzdem, z. B. WAKEWORD=<HEY_ATLAS>.
 HEY_ATLAS = os.path.join(ORDNER, "assets", "wakeword", "hey_atlas.onnx")
-WAKEWORD = os.environ.get("WAKEWORD", HEY_ATLAS if os.path.exists(HEY_ATLAS) else "hey_jarvis")
+WAKEWORD = os.environ.get("WAKEWORD", "hey_jarvis")
 WAKEWORD_SCHWELLE = float(os.environ.get("WAKEWORD_SCHWELLE", "0.5"))
 BLOCK = 1280  # 80 ms bei 16 kHz, die Blockgröße, die openWakeWord erwartet
 # So lange hört der Assistent nach einer Antwort ohne Wake-Word weiter zu; 0 schaltet Folgefragen ab
