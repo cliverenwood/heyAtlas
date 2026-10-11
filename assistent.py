@@ -61,6 +61,8 @@ STIMMEN_ORDNER = os.path.join(DATENORDNER, "stimmen")
 KALENDER = einstellung("KALENDER", "")  # leer = erster beschreibbarer Kalender
 HEIMATORT = einstellung("HEIMATORT", "")  # Ort für Wetterfragen ohne Ortsangabe
 BROWSER = einstellung("BROWSER", "Safari")  # für YouTube: "Safari" oder "Google Chrome"
+if BROWSER not in ("Safari", "Google Chrome"):  # der Name landet im AppleScript, deshalb nur bekannte Werte
+    BROWSER = "Safari"
 WHISPER_MODELL = einstellung("WHISPER_MODELL", "mlx-community/whisper-small-mlx")
 ABTASTRATE = 16000
 
@@ -252,6 +254,64 @@ def wiedergabe_gestartet() -> None:
     _wiedergabe_gestartet.set()
 
 
+# Nach "Hey Atlas" hält Atlas laufende Musik und Videos an, damit sie nicht in die Aufnahme geraten, und setzt sie
+# nach der Antwort fort; außer der Nutzer wollte ausdrücklich Pause oder hat etwas Neues gestartet
+_angehalten: list = []  # was Atlas für die aktuelle Frage angehalten hat: "Spotify", "Music", "YouTube"
+_wiedergabe_pausiert = threading.Event()
+
+
+def wiedergabe_pausiert() -> None:
+    _wiedergabe_pausiert.set()
+
+
+PLAYER_ANHALTEN = """set angehalten to ""
+if application "Spotify" is running then
+    tell application "Spotify"
+        if player state is playing then
+            pause
+            set angehalten to angehalten & "Spotify,"
+        end if
+    end tell
+end if
+if application "Music" is running then
+    tell application "Music"
+        if player state is playing then
+            pause
+            set angehalten to angehalten & "Music,"
+        end if
+    end tell
+end if
+return angehalten"""
+YOUTUBE_ANHALTEN = ("(function(){var v=document.querySelector('video'); if(!v||v.paused) return 'nein';"
+                    " v.pause(); return 'ok';})()")
+YOUTUBE_FORTSETZEN = "(function(){var v=document.querySelector('video'); if(v) v.play(); return 'ok';})()"
+
+
+def wiedergabe_anhalten() -> list:
+    angehalten = []
+    try:
+        angehalten += [quelle for quelle in osascript(PLAYER_ANHALTEN).split(",") if quelle]
+    except RuntimeError as fehler:
+        print(f"Musik anhalten: {fehler}", file=sys.stderr)
+    try:
+        if youtube_js(YOUTUBE_ANHALTEN) == "ok":
+            angehalten.append("YouTube")
+    except RuntimeError:
+        pass  # z. B. "JavaScript von Apple Events" in Safari nicht erlaubt: Video läuft dann eben weiter
+    return angehalten
+
+
+def wiedergabe_fortsetzen(angehalten: list) -> None:
+    for quelle in angehalten:
+        try:
+            if quelle == "YouTube":
+                youtube_js(YOUTUBE_FORTSETZEN)
+            else:
+                osascript(f'tell application "{quelle}" to play')
+        except RuntimeError as fehler:
+            print(f"Fortsetzen {quelle}: {fehler}", file=sys.stderr)
+
+
 def ton(name: str) -> None:
     subprocess.run(["/usr/bin/afplay", f"/System/Library/Sounds/{name}.aiff"])
 
@@ -374,6 +434,7 @@ def hoere(direkt: bool = False, max_warten_sek: float = 5.0) -> str:
             if klingeln_beenden():
                 sprich("Okay, ist aus.")
                 return ""
+            _angehalten[:] = wiedergabe_anhalten()
         audio = nimm_auf_bis_stille(max_warten_sek=max_warten_sek)
     text = transcribe(audio)
     print(f"📝 {text}")
@@ -739,6 +800,8 @@ def spotify_steuern(aktion: Literal["play", "pause", "weiter", "zurueck", "laute
     osascript(f'tell application "Spotify" to {SPOTIFY_BEFEHLE[aktion]}')
     if aktion in ("play", "weiter", "zurueck"):
         wiedergabe_gestartet()
+    elif aktion == "pause":
+        wiedergabe_pausiert()
     return f"Erledigt: {aktion}."
 
 
@@ -1489,6 +1552,8 @@ def apple_music_steuern(aktion: Literal["play", "pause", "weiter", "zurueck", "l
     osascript(f'tell application "Music" to {MUSIC_BEFEHLE[aktion]}')
     if aktion in ("play", "weiter", "zurueck"):
         wiedergabe_gestartet()
+    elif aktion == "pause":
+        wiedergabe_pausiert()
     return f"Erledigt: {aktion}."
 
 
@@ -1527,6 +1592,26 @@ YOUTUBE_JS = {
 }
 
 
+def youtube_js(js: str) -> str:
+    """Führt JavaScript im ersten YouTube-Tab aus. "kein Tab", wenn keiner offen ist oder der Browser nicht läuft
+    (ein nicht laufender Browser wird bewusst nicht gestartet)."""
+    if BROWSER == "Google Chrome":
+        befehl = "execute t javascript (item 1 of argv)"
+    else:
+        befehl = "do JavaScript (item 1 of argv) in t"
+    return osascript(f"""on run argv
+    if application "{BROWSER}" is not running then return "kein Tab"
+    tell application "{BROWSER}"
+        repeat with w in windows
+            repeat with t in tabs of w
+                if URL of t contains "youtube.com/watch" then return {befehl}
+            end repeat
+        end repeat
+    end tell
+    return "kein Tab"
+end run""", js)
+
+
 @beta_tool
 def youtube_steuern(aktion: Literal["pause", "play", "vor", "zurueck", "lauter", "leiser", "vollbild"]) -> str:
     """Steuert das offene YouTube-Video im Browser.
@@ -1536,36 +1621,16 @@ def youtube_steuern(aktion: Literal["pause", "play", "vor", "zurueck", "lauter",
     """
     js = ("(function(){var v=document.querySelector('video'); if(!v) return 'kein Video';"
           + YOUTUBE_JS[aktion] + "; return 'ok';})()")
-    if BROWSER == "Google Chrome":
-        skript = """on run argv
-    tell application "Google Chrome"
-        repeat with w in windows
-            repeat with t in tabs of w
-                if URL of t contains "youtube.com/watch" then return execute t javascript (item 1 of argv)
-            end repeat
-        end repeat
-    end tell
-    return "kein Tab"
-end run"""
-    else:
-        skript = """on run argv
-    tell application "Safari"
-        repeat with w in windows
-            repeat with t in tabs of w
-                if URL of t contains "youtube.com/watch" then return do JavaScript (item 1 of argv) in t
-            end repeat
-        end repeat
-    end tell
-    return "kein Tab"
-end run"""
     try:
-        ergebnis = osascript(skript, js)
+        ergebnis = youtube_js(js)
     except RuntimeError as fehler:
         if "JavaScript" in str(fehler):
             raise RuntimeError(f"{BROWSER} erlaubt keine Steuerung. Einmalig einschalten: Safari → Einstellungen → "
                                "Erweitert → Funktionen für Webentwickler zeigen, dann Menü Entwickler → "
                                "JavaScript von Apple Events erlauben.") from fehler
         raise
+    if ergebnis == "ok" and aktion == "pause":
+        wiedergabe_pausiert()
     if ergebnis == "ok" and aktion in ("play", "vor", "zurueck"):
         wiedergabe_gestartet()
     return {"ok": f"Erledigt: {aktion}.", "kein Tab": "Es ist kein YouTube-Video offen.",
@@ -1717,11 +1782,19 @@ end run""", "1" if nur_spielend else "0")
 
 def player_befehl(aktion: str) -> Optional[str]:
     """Steuert Spotify oder Musik. None, wenn keiner passt; dann entscheidet Claude, z. B. für YouTube."""
-    player = aktiver_player(nur_spielend=aktion != "play")
+    # Was Atlas für diese Frage selbst angehalten hat, zählt hier als "spielt gerade"
+    player = (aktiver_player(nur_spielend=aktion != "play")
+              or next((quelle for quelle in _angehalten if quelle in ("Spotify", "Music")), None))
+    if aktion == "pause" and (player or "YouTube" in _angehalten):
+        wiedergabe_pausiert()
+        if not player:
+            return "Okay."  # nur das Video lief, und das steht schon
     if not player:
         return None
     befehle = SPOTIFY_BEFEHLE if player == "Spotify" else MUSIC_BEFEHLE
     osascript(f'tell application "{player}" to {befehle[aktion]}')
+    if aktion in ("weiter", "zurueck") and player in _angehalten:
+        osascript(f'tell application "{player}" to play')  # von Atlas angehalten: nach dem Wechsel weiterspielen
     if aktion in ("play", "weiter", "zurueck"):
         wiedergabe_gestartet()
     return "Okay."
@@ -1874,11 +1947,19 @@ def eine_runde(folgefrage: bool) -> bool:
     """Hört zu und antwortet einmal. Liefert, ob danach ohne Wake-Word weitergehört werden soll."""
     # Nach einer Antwort kurz ohne Wake-Word weiterhören; Stille führt zurück zum Wake-Word
     text = hoere(direkt=True, max_warten_sek=NACHFRAGE_SEK) if folgefrage else hoere()
-    if not text:
-        return False
     _wiedergabe_gestartet.clear()
-    sprich(schnellbefehl(text) or ask(text))
-    return MODUS == "wake" and NACHFRAGE_SEK > 0 and not _wiedergabe_gestartet.is_set() and not musik_laeuft()
+    _wiedergabe_pausiert.clear()
+    try:
+        if text:
+            sprich(schnellbefehl(text) or ask(text))
+    finally:
+        fortsetzen = _angehalten and not (_wiedergabe_gestartet.is_set() or _wiedergabe_pausiert.is_set())
+        if fortsetzen:
+            wiedergabe_fortsetzen(list(_angehalten))
+        _angehalten.clear()
+    if not text or fortsetzen or _wiedergabe_gestartet.is_set():
+        return False  # läuft wieder etwas, kein Nachhören: der Ton landete sonst in der Aufnahme
+    return MODUS == "wake" and NACHFRAGE_SEK > 0 and not musik_laeuft()
 
 
 def musik_laeuft() -> bool:
