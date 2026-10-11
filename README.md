@@ -81,10 +81,11 @@ Systemeinstellungen → Allgemein → Anmeldeobjekte → „+“ → `start.comm
 ## Eigenes Aktivierungswort „Hey Atlas“
 
 Training mit dem Colab-Notizbuch aus dem README von [openWakeWord](https://github.com/dscripka/openWakeWord)
-(Phrase `hey atlas`). Die fertige Datei nach `stimmen/hey_atlas.onnx` legen und eintragen:
+(Phrase `hey atlas`). Das Modell liegt in `assets/wakeword/hey_atlas.onnx` und ist Standard; fehlt es, gilt „Hey Jarvis“.
+Mit der eigenen Stimme testen:
 
 ```sh
-echo 'export WAKEWORD="$HOME/voiceAgent/stimmen/hey_atlas.onnx"' >> ~/.zshrc
+.venv/bin/python assistent.py --wakeword-test
 ```
 
 ## Mac vor Weckern aufwecken (pmset)

@@ -3,6 +3,7 @@
 Start:  python3 assistent.py          (Wake-Word, Aufnahme endet bei einer Sprechpause)
         python3 assistent.py --ptt    (Push-to-Talk: Enter startet und beendet die Aufnahme)
         python3 assistent.py --text   (Tippen statt Sprechen, zum Testen der Tools)
+        python3 assistent.py --wakeword-test  (zeigt live, wie sicher das Wake-Word erkannt wird)
         python3 assistent.py --pmset-einrichten / --pmset-entfernen
                                       (Mac vor Weckern aus dem Ruhezustand wecken; fragt einmal nach dem Admin-Passwort)
 """
@@ -35,8 +36,10 @@ BROWSER = os.environ.get("BROWSER", "Safari")  # für YouTube: "Safari" oder "Go
 WHISPER_MODELL = os.environ.get("WHISPER_MODELL", "mlx-community/whisper-small-mlx")
 ABTASTRATE = 16000
 
-# Mitgeliefertes openWakeWord-Modell (hey_jarvis, alexa, hey_mycroft, hey_rhasspy) oder Pfad zu einer .onnx-Datei
-WAKEWORD = os.environ.get("WAKEWORD", "hey_jarvis")
+# Pfad zu einer .onnx-Datei oder ein mitgeliefertes openWakeWord-Modell (hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
+# Standard ist das selbst trainierte "Hey Atlas"; fehlt die Datei, bleibt "Hey Jarvis" als Rückfall.
+HEY_ATLAS = os.path.join(ORDNER, "assets", "wakeword", "hey_atlas.onnx")
+WAKEWORD = os.environ.get("WAKEWORD", HEY_ATLAS if os.path.exists(HEY_ATLAS) else "hey_jarvis")
 WAKEWORD_SCHWELLE = float(os.environ.get("WAKEWORD_SCHWELLE", "0.5"))
 BLOCK = 1280  # 80 ms bei 16 kHz, die Blockgröße, die openWakeWord erwartet
 # So lange hört der Assistent nach einer Antwort ohne Wake-Word weiter zu; 0 schaltet Folgefragen ab
@@ -152,7 +155,7 @@ def warte_auf_wakeword() -> None:
             download_models([WAKEWORD])
         _wakeword = Model(wakeword_models=[WAKEWORD], inference_framework="onnx")
     _wakeword.reset()
-    print(f"👂 Warte auf „{WAKEWORD}“ …")
+    print(f"👂 Warte auf „{os.path.basename(WAKEWORD).removesuffix('.onnx')}“ …")
     with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK) as strom:
         while True:
             block, _ = strom.read(BLOCK)
@@ -1597,6 +1600,26 @@ def ask(text: str) -> str:
     return antwort or "Erledigt."
 
 
+def wakeword_test() -> None:
+    """--wakeword-test: zeigt live, wie sicher das Wake-Word-Modell ist. Ctrl+C beendet."""
+    import sounddevice as sd
+    from openwakeword.model import Model
+
+    modell = Model(wakeword_models=[WAKEWORD], inference_framework="onnx")
+    print(f"Sag ein paar Mal „Hey Atlas“ und zum Vergleich andere Sätze. Schwelle: {WAKEWORD_SCHWELLE}\n")
+    hoechster, bloecke = 0.0, 0
+    with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK) as strom:
+        while True:
+            block, _ = strom.read(BLOCK)
+            hoechster = max(hoechster, max(modell.predict(block.flatten()).values()))
+            bloecke += 1
+            if bloecke == 6:  # etwa zweimal pro Sekunde eine Zeile
+                balken = "█" * int(hoechster * 40)
+                treffer = "  ← erkannt" if hoechster >= WAKEWORD_SCHWELLE else ""
+                print(f"{hoechster:5.2f} {balken}{treffer}")
+                hoechster, bloecke = 0.0, 0
+
+
 def pmset_befehl() -> bool:
     """Führt --pmset-einrichten oder --pmset-entfernen aus. True, wenn einer der beiden angegeben war."""
     if "--pmset-einrichten" in sys.argv:
@@ -1623,6 +1646,12 @@ def eine_runde(folgefrage: bool) -> bool:
 def main() -> None:
     wecker_laden()
     if pmset_befehl():
+        return
+    if "--wakeword-test" in sys.argv:
+        try:
+            wakeword_test()
+        except KeyboardInterrupt:
+            print()
         return
     threading.Thread(target=uhr_schleife, daemon=True).start()
     if not TEXTMODUS:
