@@ -81,7 +81,7 @@ Systemeinstellungen → Allgemein → Anmeldeobjekte → „+“ → `start.comm
 ## Eigenes Aktivierungswort „Hey Atlas“
 
 Training mit dem Colab-Notizbuch aus dem README von [openWakeWord](https://github.com/dscripka/openWakeWord)
-(Phrase `hey atlas`). Das Modell liegt in `assets/wakeword/hey_atlas.onnx` und ist Standard; fehlt es, gilt „Hey Jarvis“.
+(Phrase `hey atlas`). Das Modell liegt in `assets/wakeword/hey_atlas.onnx`. Die erste Version erkannte die echte Stimme kaum, deshalb ist „Hey Jarvis“ weiter Standard. Auswählen mit `WAKEWORD=assets/wakeword/hey_atlas.onnx`.
 Mit der eigenen Stimme testen:
 
 ```sh
