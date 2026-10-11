@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 
-VERSION=0.3.6
+VERSION=0.3.7
 BUILD=$(date +%Y%m%d%H%M)
 VENV=.venv312
 APP=build/heyAtlas.app

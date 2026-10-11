@@ -173,8 +173,9 @@ es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.
 
 ## Anrufe annehmen (experimentell)
 
-Optional und standardmäßig aus: Schalter „Anrufe annehmen“ im Einstellungsmenü. Während es klingelt, „Hey Atlas, nimm an“ oder
-„… lehn ab“; Atlas sagt vorher an, wer anruft. Gilt für FaceTime-Anrufe und für iPhone-Anrufe, die auf dem Mac
+Optional und standardmäßig aus: Schalter „Anrufe annehmen“ im Einstellungsmenü. Atlas sagt an, wer anruft (Name per
+Texterkennung aus der Anrufanzeige, auf dem Mac), dann „Hey Atlas, nimm an“ oder „… lehn ab“. Nach dem Auflegen hört
+Atlas von selbst wieder zu. Gilt für FaceTime-Anrufe und für iPhone-Anrufe, die auf dem Mac
 klingeln. Während eines Gesprächs hört Atlas nicht auf das Aktivierungswort.
 
 - Unter macOS 26 ist die Anruf-Mitteilung für die Bedienungshilfen leer, und Apples Anrufdienst lässt

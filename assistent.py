@@ -2101,7 +2101,6 @@ def berechtigungen_einrichten() -> list:
 # der Aufbau der Anzeige kann sich mit macOS-Updates ändern. Knopfnamen deutsch und englisch.
 ANNEHMEN = ("Annehmen", "Accept", "Answer")
 ABLEHNEN = ("Ablehnen", "Decline")
-AUFLEGEN = ("Beenden", "Auflegen", "End", "Leave")
 
 # Direkt über die Bedienungshilfen-Schnittstelle statt per AppleScript: Bei AppleScript prüft macOS die
 # Berechtigung von osascript statt von heyAtlas ("osascript is not allowed assistive access", -25211).
@@ -2262,8 +2261,8 @@ def _maus(art, x: float, y: float) -> None:
                        Quartz.CGEventCreateMouseEvent(None, art, (x, y), Quartz.kCGMouseButtonLeft))
 
 
-def knopf_per_bild(mitteilung, farbe: str) -> bool:
-    """Fotografiert die Mitteilung, sucht genau einen Knopf der Farbe und klickt ihn. True bei Klick."""
+def mitteilung_aufnehmen(mitteilung):
+    """Fotografiert nur den Bereich der Anruf-Mitteilung. Liefert (Bild als Array, Position, Größe) oder None."""
     import numpy as np
     import Quartz
     from PIL import Image
@@ -2271,15 +2270,55 @@ def knopf_per_bild(mitteilung, farbe: str) -> bool:
     punkt, groesse = _ax_punkt_und_groesse(mitteilung)
     if punkt is None or groesse is None or not Quartz.CGPreflightScreenCaptureAccess():
         print(f"Anruf per Bild: Position {punkt}, Bildschirmaufnahme erlaubt {Quartz.CGPreflightScreenCaptureAccess()}")
+        return None
+    os.makedirs(DATENORDNER, exist_ok=True)
+    bereich = f"{int(punkt.x)},{int(punkt.y)},{int(groesse.width)},{int(groesse.height)}"
+    subprocess.run(["/usr/sbin/screencapture", "-x", "-t", "png", "-R", bereich, LETZTES_ANRUFBILD], check=True)
+    return np.array(Image.open(LETZTES_ANRUFBILD).convert("RGB")), punkt, groesse
+
+
+def anrufer_erkennen(mitteilung) -> str:
+    """Liest den Namen des Anrufers per Texterkennung (Apple Vision, auf dem Mac) aus dem Bild der Mitteilung.
+    Nimmt nur Text oben links in der Anzeige: an den abgerundeten Ecken scheinen sonst fremde Fenster durch."""
+    import Vision
+    from Foundation import NSURL
+
+    if mitteilung_aufnehmen(mitteilung) is None:
+        return ""
+    anfrage = Vision.VNRecognizeTextRequest.alloc().init()
+    anfrage.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    anfrage.setRecognitionLanguages_(["de-DE", "en-US"])
+    anfrage.setUsesLanguageCorrection_(False)
+    bild = NSURL.fileURLWithPath_(LETZTES_ANRUFBILD)
+    Vision.VNImageRequestHandler.alloc().initWithURL_options_(bild, None).performRequests_error_([anfrage], None)
+    kandidaten = []
+    for beobachtung in anfrage.results() or []:
+        rahmen = beobachtung.boundingBox()  # normiert, Ursprung unten links
+        oben = 1 - rahmen.origin.y - rahmen.size.height
+        if 0.03 <= rahmen.origin.x <= 0.6 and 0.02 <= oben <= 0.25:
+            kandidaten.append((oben, str(beobachtung.topCandidates_(1)[0].string())))
+    name = anrufer_aus([text for _, text in sorted(kandidaten)])
+    print(f"Anrufer per Texterkennung: {name!r} aus {sorted(kandidaten)}")
+    return "" if name == "unbekannt" else name
+
+
+def knopf_per_bild(mitteilung, farbe: str) -> bool:
+    """Fotografiert die Mitteilung, sucht genau einen Knopf der Farbe und klickt ihn. True bei Klick."""
+    import Quartz
+
+    punkt, groesse = _ax_punkt_und_groesse(mitteilung)
+    if punkt is None or groesse is None:
         return False
     vorher = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
     # Mauszeiger auf die Mitteilung: manche zeigen ihre Knöpfe erst beim Darüberfahren
     _maus(Quartz.kCGEventMouseMoved, punkt.x + groesse.width / 2, punkt.y + groesse.height / 2)
     time.sleep(0.4)
-    os.makedirs(DATENORDNER, exist_ok=True)
+    aufnahme = mitteilung_aufnehmen(mitteilung)
+    if aufnahme is None:
+        _maus(Quartz.kCGEventMouseMoved, vorher.x, vorher.y)
+        return False
+    bild, punkt, groesse = aufnahme
     bereich = f"{int(punkt.x)},{int(punkt.y)},{int(groesse.width)},{int(groesse.height)}"
-    subprocess.run(["/usr/sbin/screencapture", "-x", "-t", "png", "-R", bereich, LETZTES_ANRUFBILD], check=True)
-    bild = np.array(Image.open(LETZTES_ANRUFBILD).convert("RGB"))
     skala = bild.shape[1] / groesse.width
     knoepfe = farbknoepfe(bild, farbe, skala)
     print(f"Anruf per Bild: Bereich {bereich}, Skala {skala:.1f}, {farbe}e Knöpfe {knoepfe}")
@@ -2332,7 +2371,7 @@ def anruf_knopf_druecken(beschriftungen: tuple) -> str:
     return ""
 
 
-ANRUF = {"klingelt": False, "anrufer": "", "pausiert_seit": 0.0, "auflegen_gesehen": False}
+ANRUF = {"klingelt": False, "anrufer": "", "pausiert_seit": 0.0, "zuletzt_gesehen": 0.0}
 
 
 def anrufanzeige() -> list:
@@ -2402,12 +2441,30 @@ def fenster_aufbau_protokollieren() -> None:
 
 
 def _klingeln_beginnt(fenster: list) -> None:
-    """Erstes Klingeln: den Anrufer ansagen."""
+    """Erstes Klingeln: den Anrufer ansagen, notfalls mit dem Namen aus der Texterkennung."""
     texte = next(ts for _, ks, ts in fenster if set(ks) & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
     ANRUF["anrufer"] = anrufer_aus(texte) if texte else ""
+    if ANRUF["anrufer"] in ("", "unbekannt"):
+        try:
+            mitteilungen = [m for _, _, _, ms in _anruf_fenster() for m in ms]
+            ANRUF["anrufer"] = anrufer_erkennen(mitteilungen[0]) if mitteilungen else ""
+        except Exception as fehler:  # ohne Namen trotzdem ansagen
+            print(f"Anrufer-Erkennung: {fehler}", file=sys.stderr)
     ansage = f"Anruf von {ANRUF['anrufer']}" if ANRUF["anrufer"] not in ("", "unbekannt") else "Eingehender Anruf"
     melde_status(ansage)
     sprich(f"{ansage}.")
+
+
+def _gespraech_pruefen(fenster_sichtbar: bool) -> None:
+    """Während eines angenommenen Gesprächs: Das Anruffenster trägt weiter die Kennung FACETIME_NOTIFICATION.
+    Ist es einige Sekunden verschwunden, ist aufgelegt, und Atlas hört wieder zu."""
+    jetzt = time.time()
+    if fenster_sichtbar:
+        ANRUF["zuletzt_gesehen"] = jetzt
+    elif jetzt - ANRUF["pausiert_seit"] > 5 and jetzt - ANRUF["zuletzt_gesehen"] > 4:
+        print("Anruf beendet, höre wieder zu")
+        ANRUF.update(pausiert_seit=0.0, klingelt=False)
+        PAUSIERT.clear()
 
 
 def anruf_pruefen() -> None:
@@ -2415,22 +2472,17 @@ def anruf_pruefen() -> None:
     fenster = anrufanzeige()
     anruf_diagnose(fenster)
     knoepfe = {k for _, ks, _ in fenster for k in ks}
-    klingelt = bool(knoepfe & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
-    if klingelt:
+    sichtbar = bool(knoepfe & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
+    if ANRUF["pausiert_seit"]:  # Gespräch läuft: das Fenster ist das Gespräch, kein neuer Anruf
+        _gespraech_pruefen(sichtbar)
+        return
+    if sichtbar:
         anruf_mitteilung_protokollieren()
-    if klingelt and not ANRUF["klingelt"]:
-        _klingeln_beginnt(fenster)
-    if not klingelt:
+    else:
         _diagnose["mitteilung_protokolle"] = 0
-    ANRUF["klingelt"] = klingelt
-    if ANRUF["pausiert_seit"]:  # Gespräch läuft, von Atlas pausiert
-        if knoepfe & set(AUFLEGEN):
-            ANRUF["auflegen_gesehen"] = True
-        elif ANRUF["auflegen_gesehen"] or time.time() - ANRUF["pausiert_seit"] > 3 * 3600:
-            ANRUF.update(pausiert_seit=0.0, auflegen_gesehen=False)  # Gespräch vorbei
-            PAUSIERT.clear()
-        elif time.time() - ANRUF["pausiert_seit"] > 20:
-            melde_status("Pausiert wegen Anruf (im Menü fortsetzen)")
+    if sichtbar and not ANRUF["klingelt"]:
+        _klingeln_beginnt(fenster)
+    ANRUF["klingelt"] = sichtbar
 
 
 def anruf_berechtigung_fehlt(fehler: str) -> str:
@@ -2462,7 +2514,7 @@ def anruf_annehmen() -> Optional[str]:
         return None
     if not anruf_knopf_druecken(ANNEHMEN):
         return "Per Sprache kann ich den Anruf leider nicht annehmen. Klick bitte auf Annehmen."
-    ANRUF.update(klingelt=False, pausiert_seit=time.time(), auflegen_gesehen=False)
+    ANRUF.update(klingelt=False, pausiert_seit=time.time(), zuletzt_gesehen=time.time())
     PAUSIERT.set()  # während des Gesprächs nicht auf das Aktivierungswort hören
     wiedergabe_pausiert()  # angehaltene Musik nach dem Annehmen nicht wieder starten
     return ""  # nichts sagen, das Gespräch beginnt
