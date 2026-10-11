@@ -131,11 +131,20 @@ class AtlasApp(rumps.App):
     def einstellungsmenue(self) -> rumps.MenuItem:
         menue = rumps.MenuItem("Einstellungen")
         stimmen = rumps.MenuItem("Stimme")
-        for name, wert in STIMMEN.items():
-            eintrag = rumps.MenuItem(name, callback=self.stimme_waehlen)
-            eintrag.state = wert == atlas.STIMME
-            stimmen.add(eintrag)
-        stimmen.add(None)
+        # Piper-Stimmen (werden bei Bedarf geladen), dann die installierten macOS-Systemstimmen
+        self.stimmen = dict(STIMMEN)
+        macos = {f"{name} (macOS)": atlas.MACOS_PRAEFIX + name for name in atlas.macos_stimmen()}
+        for gruppe in (STIMMEN, macos):
+            for titel, wert in gruppe.items():
+                eintrag = rumps.MenuItem(titel, callback=self.stimme_waehlen)
+                eintrag.state = wert == atlas.STIMME
+                stimmen.add(eintrag)
+            stimmen.add(None)
+        self.stimmen.update(macos)
+        if not macos:
+            stimmen.add(rumps.MenuItem("Bessere Stimmen: Systemeinstellungen → Bedienungshilfen → "
+                                       "Gesprochene Inhalte → Stimmen verwalten"))
+            stimmen.add(None)
         stimmen.add(rumps.MenuItem("Probehören", callback=lambda _: self.probehoeren(atlas.STIMME)))
         menue.add(stimmen)
         for titel, (name, werte) in AUSWAHLEN.items():
@@ -227,10 +236,11 @@ class AtlasApp(rumps.App):
             self.neustarten()
 
     def stimme_waehlen(self, eintrag) -> None:
-        name = STIMMEN[eintrag.title]
+        name = self.stimmen[eintrag.title]
 
         def laden_und_wechseln() -> None:
-            atlas.stimmen_pfad(name)  # lädt die Stimme beim ersten Mal herunter
+            if not name.startswith(atlas.MACOS_PRAEFIX):
+                atlas.stimmen_pfad(name)  # lädt eine Piper-Stimme beim ersten Mal herunter
             self.probehoeren(name)
             werte = atlas.einstellungen_laden()
             werte["STIMME"] = name
@@ -243,7 +253,7 @@ class AtlasApp(rumps.App):
 
     def probehoeren(self, name: str) -> None:
         def sprechen() -> None:
-            atlas.vorlesen("Hallo, ich bin Atlas. So klinge ich mit dieser Stimme.", atlas.lade_stimme(name))
+            atlas.vorlesen("Hallo, ich bin Atlas. So klinge ich mit dieser Stimme.", name)
 
         threading.Thread(target=sprechen, daemon=True).start()
 

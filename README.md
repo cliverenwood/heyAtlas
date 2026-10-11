@@ -34,7 +34,7 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 | Variable | Standard | Zweck |
 |---|---|---|
 | `CLAUDE_MODELL` | `claude-sonnet-5` | `claude-opus-5` ist gründlicher, aber etwa doppelt so langsam |
-| `STIMME` | `stimmen/de_DE-thorsten-medium.onnx` | Piper-Stimme; weitere laden mit `cd stimmen && ../.venv312/bin/python -m piper.download_voices de_DE-kerstin-low` |
+| `STIMME` | `de_DE-thorsten-medium` | Piper-Stimme (Name, wird geladen) oder macOS-Systemstimme als `macos:Anna (Premium)`; Premium-Stimmen unter Bedienungshilfen → Gesprochene Inhalte → Stimmen verwalten |
 | `KALENDER` | erster beschreibbarer | Kalender für neue Termine |
 | `BROWSER` | `Safari` | Browser für YouTube, alternativ `Google Chrome` |
 | `HEIMATORT` | leer | Ort für Wetterfragen ohne Ortsangabe, z. B. `Hamburg` |

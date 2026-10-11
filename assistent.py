@@ -213,15 +213,40 @@ def lade_stimme(name: Optional[str] = None):
     return _stimme
 
 
-def vorlesen(text: str, stimme=None) -> None:
-    """Spielt Text mit afplay ab, Satz für Satz; der nächste Satz entsteht, während der vorige läuft.
+MACOS_PRAEFIX = "macos:"  # Stimmen-Einstellung "macos:Anna (Premium)" nutzt eine Systemstimme über say
+
+
+def macos_stimmen() -> list:
+    """Installierte deutsche macOS-Stimmen in Premium- oder erweiterter Qualität, z. B. "Anna (Premium)".
+    Die einfachen Stimmen und die Effektstimmen wie "Grandpa" bleiben außen vor."""
+    ergebnis = subprocess.run(["/usr/bin/say", "-v", "?"], capture_output=True, text=True)
+    stimmen = []
+    for zeile in ergebnis.stdout.splitlines():
+        treffer = re.match(r"(.+?)\s+de_(DE|AT|CH)\s", zeile)
+        if treffer and re.search(r"\((Premium|Enhanced|Erweitert)\)", treffer.group(1)):
+            stimmen.append(treffer.group(1).strip())
+    return stimmen
+
+
+def vorlesen(text: str, name: Optional[str] = None) -> None:
+    """Spricht den Text mit der eingestellten Stimme, oder mit name (zum Probehören)."""
+    name = name or STIMME
+    with _ausgabe_sperre:  # Timer und Wecker sprechen aus eigenen Threads
+        if name.startswith(MACOS_PRAEFIX):
+            # Text über stdin, damit er nie als Option von say gelesen wird
+            subprocess.run(["/usr/bin/say", "-v", name.removeprefix(MACOS_PRAEFIX), "-f", "-"], input=text, text=True)
+        else:
+            _piper_vorlesen(text, lade_stimme(None if name == STIMME else name))
+
+
+def _piper_vorlesen(text: str, stimme) -> None:
+    """Spielt Piper-Sprache mit afplay ab, Satz für Satz; der nächste Satz entsteht, während der vorige läuft.
     Bewusst nicht über sounddevice: dessen Abspielfunktion läuft in Python und bekommt neben der
     Wake-Word-Erkennung nicht rechtzeitig Rechenzeit, das gab heftiges Knacken."""
     import tempfile
     import wave
 
-    stimme = stimme or lade_stimme()
-    with _ausgabe_sperre, tempfile.TemporaryDirectory() as ordner:  # Timer und Wecker sprechen aus Threads
+    with tempfile.TemporaryDirectory() as ordner:
         laufend = None
         for nummer, teil in enumerate(stimme.synthesize(text)):
             datei = os.path.join(ordner, f"{nummer}.wav")
@@ -1983,7 +2008,8 @@ def main() -> None:
     threading.Thread(target=uhr_schleife, daemon=True).start()
     if not TEXTMODUS:
         lade_whisper()  # vorab laden, damit die erste Antwort nicht hängt
-        lade_stimme()
+        if not STIMME.startswith(MACOS_PRAEFIX):
+            lade_stimme()
     sprich("Ich bin bereit.")
     folgefrage = False
     while True:
