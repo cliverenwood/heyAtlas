@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Modelle werden heruntergeladen bzw. selbst trainiert, nicht eingecheckt
+stimmen/*.onnx
+stimmen/*.onnx.json
+
+# macOS und Build-Artefakte
+.DS_Store
+build/
+dist/
+*.dmg

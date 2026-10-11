@@ -1,0 +1,7 @@
+anthropic>=0.125
+sounddevice
+numpy
+mlx-whisper
+openwakeword
+piper-tts
+pyobjc-framework-EventKit
