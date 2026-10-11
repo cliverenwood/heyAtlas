@@ -85,6 +85,29 @@ SCHLUESSEL = {
 }
 
 
+EINSTELLUNGSSEITE = "x-apple.systempreferences:com.apple.preference.security?"
+OPTIONALE_FUNKTIONEN = {
+    # Menütitel: (Einstellung, Systemeinstellungen-Seite, Text beim Einschalten, Text beim Ausschalten)
+    "Nachrichten vorlesen (iMessage/SMS)": (
+        "NACHRICHTEN_LESEN", EINSTELLUNGSSEITE + "Privacy_AllFiles",
+        "Atlas liest dann deine iMessages und SMS aus der Nachrichten-Datenbank und kann darauf antworten. Dafür "
+        "braucht heyAtlas „Festplattenvollzugriff“. Diese Berechtigung erlaubt das Lesen aller Dateien; heyAtlas "
+        "öffnet nur die Nachrichten-Datenbank. Vorgelesene Nachrichten gehen zur Beantwortung an Claude.\n\n"
+        "Gleich öffnen sich die Systemeinstellungen: heyAtlas dort unter Festplattenvollzugriff einschalten. "
+        "SMS kommen nur mit eingeschalteter SMS-Weiterleitung auf dem iPhone an.",
+        "Atlas liest dann keine Nachrichten mehr. Entziehe heyAtlas bitte auch den Festplattenvollzugriff in den "
+        "Systemeinstellungen, die sich gleich öffnen."),
+    "Anrufe annehmen": (
+        "ANRUFE_ANNEHMEN", EINSTELLUNGSSEITE + "Privacy_Accessibility",
+        "Atlas sagt dann eingehende FaceTime- und iPhone-Anrufe an; mit „Hey Atlas, nimm an“ oder „… lehn ab“ "
+        "nimmt er sie an oder lehnt sie ab. Dafür braucht heyAtlas „Bedienungshilfen“, damit darf es andere Apps "
+        "bedienen. macOS fragt gleich danach.\n\nFür iPhone-Anrufe: iPhone → Telefon → Auf anderen Geräten und "
+        "Mac → FaceTime → Anrufe vom iPhone einschalten.",
+        "Atlas nimmt dann keine Anrufe mehr an. Entziehe heyAtlas bitte auch die Bedienungshilfen in den "
+        "Systemeinstellungen, die sich gleich öffnen."),
+}
+
+
 def menueleisten_bild(pfad_1x: str):
     """Symbol mit allen Auflösungen (1x, 2x, 3x) als Vorlage. rumps lädt nur die 1x-Datei und vergrößert sie;
     auf Retina-Bildschirmen wirkt das Symbol dann unscharf."""
@@ -172,6 +195,11 @@ class AtlasApp(rumps.App):
             schluessel.add(rumps.MenuItem(titel, callback=self.schluessel_eingeben))
         menue.add(schluessel)
         menue.add(None)
+        for titel, (name, *_rest) in OPTIONALE_FUNKTIONEN.items():
+            schalter = rumps.MenuItem(titel, callback=self.optionale_funktion)
+            schalter.state = bool(getattr(atlas, name))
+            menue.add(schalter)
+        menue.add(None)
         menue.add(self.autostart)
         menue.add(self.pmset)
         return menue
@@ -220,6 +248,7 @@ class AtlasApp(rumps.App):
 
     def pausieren(self, eintrag) -> None:
         if atlas.PAUSIERT.is_set():
+            atlas.ANRUF["pausiert_seit"] = 0.0  # auch eine Pause wegen eines Anrufs beenden
             atlas.PAUSIERT.clear()
             eintrag.title = "Pausieren"
         else:
@@ -290,6 +319,21 @@ class AtlasApp(rumps.App):
             atlas.vorlesen("Hallo, ich bin Atlas. So klinge ich mit dieser Stimme.", name)
 
         threading.Thread(target=sprechen, daemon=True).start()
+
+    def optionale_funktion(self, eintrag) -> None:
+        name, seite, text_an, text_aus = OPTIONALE_FUNKTIONEN[eintrag.title]
+        einschalten = not eintrag.state
+        if rumps.alert(eintrag.title, text_an if einschalten else text_aus,
+                       ok="Einschalten" if einschalten else "Ausschalten", cancel="Abbrechen") != 1:
+            return
+        werte = atlas.einstellungen_laden()
+        werte[name] = einschalten
+        atlas.einstellungen_speichern(werte)
+        if einschalten and name == "ANRUFE_ANNEHMEN":
+            atlas.bedienungshilfen_erlaubt(nachfragen=True)  # macOS zeigt eigenen Dialog mit Link
+        else:
+            subprocess.run(["/usr/bin/open", seite])  # Berechtigung erteilen bzw. wieder entziehen
+        self.neustarten()
 
     # ------------------------------------------------------------ Autostart und pmset
 

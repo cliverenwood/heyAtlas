@@ -8,3 +8,4 @@ pyobjc-framework-EventKit
 rumps
 pyobjc-framework-ServiceManagement
 pyobjc-framework-AVFoundation
+pyobjc-framework-ApplicationServices

@@ -54,7 +54,8 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 - `spotify_steuern`: Play, Pause, weiter, zurück, lauter, leiser, Zufallswiedergabe
 - `spotify_aktueller_titel`: was gerade läuft
 - `notiz_anlegen`, `notizen_suchen`: Notizen-App
-- `nachricht_senden`: iMessage an einen Kontakt, mit Rückfrage vor dem Senden (SMS siehe Abschnitt „Nachrichten: iMessage und SMS“)
+- `nachricht_senden`: Nachricht an einen Kontakt als iMessage, sonst SMS, mit Rückfrage vor dem Senden
+- `imessages_lesen`, `imessage_antworten`: iMessages und SMS vorlesen und im selben Chat antworten (optional, siehe „Nachrichten: iMessage und SMS“)
 - `kurzbefehle_auflisten`, `kurzbefehl_ausfuehren`: Kurzbefehle aus dem Ordner „Sprachassistent“, z. B. Home-Szenen
 - `timer_stellen`, `timer_abfragen`, `timer_abbrechen`: mehrere benannte Timer gleichzeitig
 - `wecker_stellen`, `wecker_auflisten`, `wecker_loeschen`: einmalig oder an Wochentagen, gespeichert in `~/Library/Application Support/heyAtlas/wecker.json`
@@ -152,7 +153,7 @@ packaging/build.sh          # baut build/heyAtlas.app und build/heyAtlas-<Versio
 
 Beim ersten Start fragt heyAtlas alle Zugriffe auf einmal ab: Mikrofon, Kalender und Erinnerungen (Vollzugriff)
 sowie die Steuerung von Kalender, Erinnerungen, Notizen, Mail, Nachrichten, Kontakte, Musik, Spotify, Browser und
-Systemereignisse. Dafür startet es nicht laufende Apps kurz unsichtbar und beendet sie danach wieder. Am Ende zeigt
+Systemereignisse; bei eingeschalteten Zusatzfunktionen auch Festplattenvollzugriff bzw. Bedienungshilfen. Dafür startet es nicht laufende Apps kurz unsichtbar und beendet sie danach wieder. Am Ende zeigt
 es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.
 
 ## Nachrichten: iMessage und SMS
@@ -163,16 +164,16 @@ es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.
 > Ohne diese Einstellung sieht und sendet heyAtlas nur iMessages.
 
 - Für den älteren Verlauf zusätzlich „Nachrichten in iCloud“ auf iPhone und Mac einschalten.
-- Senden: heute nur als iMessage. Geplant: erst iMessage, sonst SMS.
-- Vorlesen (geplant, **optional und standardmäßig aus**): Schalter „Nachrichten vorlesen“ im Einstellungsmenü.
+- Senden: erst als iMessage, sonst als SMS; „per SMS“ erzwingt eine SMS.
+- Vorlesen und Antworten (**optional und standardmäßig aus**): Schalter „Nachrichten vorlesen (iMessage/SMS)“ im Einstellungsmenü.
   Erst dann liest heyAtlas die Nachrichten-Datenbank `~/Library/Messages/chat.db`. Dafür braucht es
   **Festplattenvollzugriff** (Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff → heyAtlas),
   den man selbst erteilt; eine App kann ihn nicht abfragen. Diese Berechtigung erlaubt das Lesen aller Dateien;
   heyAtlas öffnet nur die Nachrichten-Datenbank. Beim Ausschalten den Festplattenvollzugriff wieder entziehen.
 
-## Anrufe annehmen (geplant)
+## Anrufe annehmen (experimentell)
 
-Optional und standardmäßig aus: Schalter im Einstellungsmenü. Während es klingelt, „Hey Atlas, nimm an“ oder
+Optional und standardmäßig aus: Schalter „Anrufe annehmen“ im Einstellungsmenü. Während es klingelt, „Hey Atlas, nimm an“ oder
 „… lehn ab“; Atlas sagt vorher an, wer anruft. Gilt für FaceTime-Anrufe und für iPhone-Anrufe, die auf dem Mac
 klingeln. Während eines Gesprächs hört Atlas nicht auf das Aktivierungswort.
 
@@ -182,4 +183,5 @@ klingeln. Während eines Gesprächs hört Atlas nicht auf das Aktivierungswort.
 - **Für iPhone-Anrufe auf dem Mac** müssen eingeschaltet sein:
   - iPhone → Einstellungen → Apps → Telefon → **Auf anderen Geräten** → diesen Mac erlauben
   - Mac → FaceTime → Einstellungen → **Anrufe vom iPhone**
-- Hängt am Aufbau der Anrufanzeige; nach macOS-Updates kann eine Anpassung nötig sein.
+- Hängt am Aufbau der Anrufanzeige; nach macOS-Updates kann eine Anpassung nötig sein. Erkennt Atlas nach dem
+  Annehmen die Gesprächssteuerung nicht, bleibt er pausiert, bis man im Menü „Fortsetzen“ wählt.

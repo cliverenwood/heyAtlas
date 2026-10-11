@@ -79,6 +79,9 @@ WAKEWORD_SCHWELLE = float(einstellung("WAKEWORD_SCHWELLE", "0.5"))
 BLOCK = 1280  # 80 ms bei 16 kHz, die Blockgröße, die openWakeWord erwartet
 # So lange hört der Assistent nach einer Antwort ohne Wake-Word weiter zu; 0 schaltet Folgefragen ab
 NACHFRAGE_SEK = float(einstellung("NACHFRAGE_SEK", "4"))
+# Optionale Funktionen mit weitreichenden Berechtigungen, standardmäßig aus (Schalter im Einstellungsmenü)
+NACHRICHTEN_LESEN = einstellung("NACHRICHTEN_LESEN", "") in ("1", "True", "true")  # braucht Festplattenvollzugriff
+ANRUFE_ANNEHMEN = einstellung("ANRUFE_ANNEHMEN", "") in ("1", "True", "true")  # braucht Bedienungshilfen
 # Nur Kurzbefehle aus diesem Ordner der Kurzbefehle-App darf der Assistent ausführen
 KURZBEFEHL_ORDNER = einstellung("KURZBEFEHL_ORDNER", "Sprachassistent")
 
@@ -1260,11 +1263,11 @@ end run""", name)
     return kontakte
 
 
-def eindeutiger_kontakt(name: str, nur_mail: bool = False):
+def eindeutiger_kontakt(name: str, nur_mail: bool = False, nur_telefon: bool = False):
     """Ein passender Kontakt mit Adresse, oder ein Text für Claude, warum nicht."""
-    kontakte = [(n, (m if nur_mail else t + m)) for n, t, m in kontakte_suchen(name)]
+    kontakte = [(n, (m if nur_mail else t if nur_telefon else t + m)) for n, t, m in kontakte_suchen(name)]
     kontakte = [(n, adressen) for n, adressen in kontakte if adressen]
-    art = "E-Mail-Adresse" if nur_mail else "Telefonnummer oder E-Mail"
+    art = "E-Mail-Adresse" if nur_mail else "Telefonnummer" if nur_telefon else "Telefonnummer oder E-Mail"
     if not kontakte:
         return None, f"Kein Kontakt '{name}' mit {art} gefunden."
     if len(kontakte) > 1:
@@ -1272,27 +1275,183 @@ def eindeutiger_kontakt(name: str, nur_mail: bool = False):
     return kontakte[0], ""
 
 
+# Erst iMessage, sonst SMS (SMS nur mit SMS-Weiterleitung auf dem iPhone, siehe README); argv: Adresse, Text, nur SMS
+NACHRICHT_SENDEN = """on run argv
+    tell application "Messages"
+        if (item 3 of argv) is "0" then
+            try
+                send (item 2 of argv) to participant (item 1 of argv) of (1st account whose service type = iMessage)
+                return "iMessage"
+            end try
+        end if
+        send (item 2 of argv) to participant (item 1 of argv) of (1st account whose service type = SMS)
+        return "SMS"
+    end tell
+end run"""
+
+
 @beta_tool
-def nachricht_senden(empfaenger: str, text: str) -> str:
-    """Schickt eine iMessage an einen Kontakt aus der Kontakte-App. Fragt vorher per Sprache nach.
+def nachricht_senden(empfaenger: str, text: str, per_sms: bool = False) -> str:
+    """Schickt eine Nachricht an einen Kontakt aus der Kontakte-App, als iMessage oder, wenn das nicht geht, als
+    SMS. Fragt vorher per Sprache nach.
 
     Args:
         empfaenger: Name des Kontakts, wie er in Kontakte steht, z. B. "Anna" oder "Anna Müller".
         text: Text der Nachricht.
+        per_sms: True, wenn der Nutzer ausdrücklich eine SMS will.
     """
-    kontakt, problem = eindeutiger_kontakt(empfaenger)
+    kontakt, problem = eindeutiger_kontakt(empfaenger, nur_telefon=per_sms)
     if not kontakt:
         return problem
     name, adressen = kontakt
     if not bestaetigen(f"Soll ich {name} schreiben: {text}?"):
         return "Der Nutzer hat abgelehnt, die Nachricht wurde nicht gesendet."
-    osascript("""on run argv
-    tell application "Messages"
-        set dienst to 1st account whose service type = iMessage
-        send (item 2 of argv) to participant (item 1 of argv) of dienst
-    end tell
-end run""", adressen[0], text)
-    return f"Nachricht an {name} gesendet."
+    try:
+        dienst = osascript(NACHRICHT_SENDEN, adressen[0], text, "1" if per_sms else "0")
+    except RuntimeError as fehler:
+        raise RuntimeError(f"Senden fehlgeschlagen. Für SMS muss auf dem iPhone die SMS-Weiterleitung für diesen "
+                           f"Mac an sein. ({fehler})") from fehler
+    return f"Nachricht an {name} als {dienst} gesendet."
+
+
+# ---------------------------------------------------------------- iMessages und SMS lesen (optional)
+
+NACHRICHTEN_DB = os.path.expanduser("~/Library/Messages/chat.db")
+APPLE_EPOCHE = 978307200  # 2001-01-01 in Unix-Sekunden; Nachrichten zählt Nanosekunden ab dort
+
+NACHRICHTEN_ABFRAGE = """
+SELECT m.ROWID, m.text, m.attributedBody, m.date, m.is_read, m.service, h.id, c.guid, c.display_name
+FROM message m
+LEFT JOIN handle h ON h.ROWID = m.handle_id
+LEFT JOIN chat_message_join j ON j.message_id = m.ROWID
+LEFT JOIN chat c ON c.ROWID = j.chat_id
+WHERE m.is_from_me = 0 AND m.date > ? AND (? = 0 OR m.is_read = 0)
+  AND (m.associated_message_type IS NULL OR m.associated_message_type = 0)
+ORDER BY m.date DESC LIMIT 200
+"""
+
+# Alle Kontakte in drei Apple Events statt einem pro Kontakt; Ausgabe "Name<31>Adresse;Adresse<30>"
+KONTAKT_VERZEICHNIS = """set feld to character id 31
+set satz to character id 30
+tell application "Contacts"
+    set namen to name of every person
+    set nummern to value of phones of every person
+    set mails to value of emails of every person
+end tell
+set ausgabe to ""
+repeat with i from 1 to count of namen
+    set werte to ""
+    repeat with w in (item i of nummern) & (item i of mails)
+        set werte to werte & w & ";"
+    end repeat
+    if werte is not "" then set ausgabe to ausgabe & (item i of namen) & feld & werte & satz
+end repeat
+return ausgabe"""
+
+_verzeichnis = {"bis": 0.0, "eintraege": {}}
+_letzte_imessages: dict = {}  # Kennung N1… -> (Chat-Kennung, Absender, Name)
+
+
+def handle_schluessel(adresse: str) -> str:
+    """Vergleichbare Form: E-Mails klein, Telefonnummern als letzte 9 Ziffern (+49 170 … und 0170 … gleich)."""
+    if "@" in adresse:
+        return adresse.strip().lower()
+    return re.sub(r"\D", "", adresse)[-9:]
+
+
+def kontaktname(adresse: str) -> str:
+    if time.time() > _verzeichnis["bis"]:  # 30 Minuten zwischenspeichern
+        eintraege = {}
+        for satz in osascript(KONTAKT_VERZEICHNIS).split("\x1e"):
+            if "\x1f" in satz:
+                name, werte = satz.split("\x1f", 1)
+                eintraege.update({handle_schluessel(w): name for w in werte.split(";") if w})
+        _verzeichnis.update(bis=time.time() + 1800, eintraege=eintraege)
+    return _verzeichnis["eintraege"].get(handle_schluessel(adresse or ""), adresse or "unbekannt")
+
+
+def nachrichtentext(text: Optional[str], attributed: Optional[bytes]) -> str:
+    """Neuere macOS-Versionen speichern den Text oft nur in attributedBody (NSAttributedString, typedstream)."""
+    if text:
+        return text
+    if not attributed:
+        return ""
+    from Foundation import NSData, NSUnarchiver
+
+    try:
+        objekt = NSUnarchiver.unarchiveObjectWithData_(NSData.dataWithBytes_length_(attributed, len(attributed)))
+        return str(objekt.string()) if objekt is not None else ""
+    except Exception:  # beschädigte oder unbekannte Einträge überspringen statt abzubrechen
+        return ""
+
+
+def nachrichten_db_lesen(seit_tagen: int, nur_ungelesen: bool) -> list:
+    import sqlite3
+
+    seit = (time.time() - max(0, seit_tagen) * 86400 - APPLE_EPOCHE) * 1_000_000_000
+    try:
+        verbindung = sqlite3.connect(f"file:{NACHRICHTEN_DB}?mode=ro", uri=True)
+    except sqlite3.OperationalError as fehler:
+        raise RuntimeError("Kein Zugriff auf die Nachrichten. heyAtlas braucht Festplattenvollzugriff: "
+                           "Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff.") from fehler
+    try:
+        return verbindung.execute(NACHRICHTEN_ABFRAGE, (seit, 1 if nur_ungelesen else 0)).fetchall()
+    except sqlite3.DatabaseError as fehler:
+        raise RuntimeError("Kein Zugriff auf die Nachrichten. heyAtlas braucht Festplattenvollzugriff: "
+                           "Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff.") from fehler
+    finally:
+        verbindung.close()
+
+
+@beta_tool
+def imessages_lesen(nur_ungelesen: bool = True, seit_tagen: int = 2, kontakt: Optional[str] = None,
+                    anzahl: int = 10) -> str:
+    """Liest empfangene iMessages und SMS, neueste zuerst. Kennungen wie N1 dienen zum Antworten.
+
+    Args:
+        nur_ungelesen: Nur ungelesene Nachrichten.
+        seit_tagen: Zeitraum in Tagen bis heute.
+        kontakt: Nur von diesem Kontakt, z. B. "Anna".
+        anzahl: Höchstens so viele Nachrichten.
+    """
+    zeilen = []
+    _letzte_imessages.clear()
+    for _, text, attributed, datum, gelesen, dienst, absender, chat_guid, gruppe in \
+            nachrichten_db_lesen(seit_tagen, nur_ungelesen):
+        inhalt, name = nachrichtentext(text, attributed).strip(), kontaktname(absender)
+        if not inhalt or (kontakt and kontakt.lower() not in f"{name} {absender}".lower()):
+            continue
+        nummer = f"N{len(zeilen) + 1}"
+        _letzte_imessages[nummer] = (chat_guid, absender, name, dienst)
+        wann = datetime.fromtimestamp(datum / 1_000_000_000 + APPLE_EPOCHE)
+        ort = f" in „{gruppe}“" if gruppe else ""
+        zeilen.append(f"[{nummer}] {wann:%d.%m. %H:%M} von {name}{ort} ({dienst}"
+                      f"{', ungelesen' if not gelesen else ''}): {inhalt}")
+        if len(zeilen) >= anzahl:
+            break
+    return "\n".join(zeilen) or "Keine passenden Nachrichten."
+
+
+@beta_tool
+def imessage_antworten(kennung: str, text: str) -> str:
+    """Antwortet im selben Chat auf eine mit imessages_lesen gelesene Nachricht. Fragt vorher per Sprache nach.
+
+    Args:
+        kennung: Kennung aus imessages_lesen, z. B. N1.
+        text: Antworttext.
+    """
+    eintrag = _letzte_imessages.get(kennung.strip().upper())
+    if eintrag is None:
+        return f"Unbekannte Kennung {kennung}. Lies die Nachrichten zuerst mit imessages_lesen."
+    chat_guid, absender, name, dienst = eintrag
+    if not bestaetigen(f"Soll ich {name} antworten: {text}?"):
+        return "Der Nutzer hat abgelehnt, die Antwort wurde nicht gesendet."
+    if chat_guid:  # im selben Chat, auch in Gruppen und mit demselben Dienst
+        osascript('on run argv\ntell application "Messages" to send (item 1 of argv) to chat id (item 2 of argv)'
+                  '\nend run', text, chat_guid)
+    else:
+        osascript(NACHRICHT_SENDEN, absender, text, "1" if dienst == "SMS" else "0")
+    return f"Antwort an {name} gesendet."
 
 
 # ---------------------------------------------------------------- Mail
@@ -1860,6 +2019,15 @@ def app_beenden_ohne_steuerung(app: str) -> None:
         laufend.terminate()
 
 
+def festplattenvollzugriff_pruefen() -> str:
+    """Festplattenvollzugriff kann keine App abfragen, nur prüfen; erteilt wird er in den Systemeinstellungen."""
+    try:
+        nachrichten_db_lesen(0, True)
+        return "erlaubt"
+    except RuntimeError:
+        return "abgelehnt"
+
+
 def berechtigungen_einrichten() -> list:
     """Fragt alle Zugriffe nacheinander ab. Liefert [(Bereich, Ergebnis)] für die Übersicht."""
     schritte = [("Mikrofon", mikrofon_erlauben),
@@ -1867,6 +2035,11 @@ def berechtigungen_einrichten() -> list:
                 ("Erinnerungen (Vollzugriff)", lambda: eventkit_erlauben("erinnerungen"))]
     schritte += [(f"Steuerung: {anzeige}", lambda app=app: automation_erlauben(app))
                  for anzeige, app in AUTOMATION_ZIELE]
+    if NACHRICHTEN_LESEN:
+        schritte.append(("Festplattenvollzugriff (Nachrichten)", festplattenvollzugriff_pruefen))
+    if ANRUFE_ANNEHMEN:
+        schritte.append(("Bedienungshilfen (Anrufe)",
+                         lambda: "erlaubt" if bedienungshilfen_erlaubt(nachfragen=True) else "abgelehnt"))
     ergebnisse = []
     for nummer, (bereich, abfrage) in enumerate(schritte, 1):
         melde_status(f"Berechtigungen {nummer}/{len(schritte)}: {bereich}")
@@ -1876,6 +2049,157 @@ def berechtigungen_einrichten() -> list:
             ergebnisse.append((bereich, f"Fehler: {str(fehler)[:60]}"))
         print(f"Berechtigung {bereich}: {ergebnisse[-1][1]}")
     return ergebnisse
+
+
+# ---------------------------------------------------------------- Anrufe annehmen (optional)
+
+# Atlas bedient die Anrufanzeige von macOS per Bedienungshilfen, wie ein Klick. Apple bietet dafür keine Schnittstelle;
+# der Aufbau der Anzeige kann sich mit macOS-Updates ändern. Knopfnamen deutsch und englisch.
+ANNEHMEN = ("Annehmen", "Accept", "Answer")
+ABLEHNEN = ("Ablehnen", "Decline")
+AUFLEGEN = ("Beenden", "Auflegen", "End", "Leave")
+ANRUF_PROZESSE = ("NotificationCenter", "FaceTime")
+
+# Liefert je Fenster mit Knöpfen eine Zeile "Prozess<31>Knopf;Knopf;<31>Text;Text;"
+ANRUF_ANZEIGE = """set feld to character id 31
+set ausgabe to ""
+tell application "System Events"
+    repeat with prozessname in {"NotificationCenter", "FaceTime"}
+        if exists process prozessname then
+            tell process prozessname
+                repeat with fenster in windows
+                    set knoepfe to ""
+                    set texte to ""
+                    repeat with element in (entire contents of fenster)
+                        try
+                            set art to role of element
+                            if art is "AXButton" then set knoepfe to knoepfe & (name of element) & ";"
+                            if art is "AXStaticText" then set texte to texte & (value of element) & ";"
+                        end try
+                    end repeat
+                    if knoepfe is not "" then ¬
+                        set ausgabe to ausgabe & prozessname & feld & knoepfe & feld & texte & linefeed
+                end repeat
+            end tell
+        end if
+    end repeat
+end tell
+return ausgabe"""
+
+# Drückt den ersten Knopf mit einem der Namen aus argv
+ANRUF_KNOPF = """on run argv
+    tell application "System Events"
+        repeat with prozessname in {"NotificationCenter", "FaceTime"}
+            if exists process prozessname then
+                tell process prozessname
+                    repeat with fenster in windows
+                        repeat with element in (entire contents of fenster)
+                            try
+                                if role of element is "AXButton" and argv contains (name of element) then
+                                    perform action "AXPress" of element
+                                    return name of element
+                                end if
+                            end try
+                        end repeat
+                    end repeat
+                end tell
+            end if
+        end repeat
+    end tell
+    return ""
+end run"""
+
+ANRUF = {"klingelt": False, "anrufer": "", "pausiert_seit": 0.0, "auflegen_gesehen": False}
+
+
+def anrufanzeige() -> list:
+    """[(Prozess, [Knöpfe], [Texte])] aller Fenster der Anrufanzeige mit Knöpfen."""
+    fenster = []
+    for zeile in osascript(ANRUF_ANZEIGE).splitlines():
+        if zeile.count("\x1f") == 2:
+            prozess, knoepfe, texte = zeile.split("\x1f")
+            fenster.append((prozess, [k for k in knoepfe.split(";") if k], [t for t in texte.split(";") if t]))
+    return fenster
+
+
+def anrufer_aus(texte: list) -> str:
+    """Erster Text, der nach einem Namen aussieht, nicht nach "FaceTime-Audio" oder "Anruf"."""
+    for text in texte:
+        if not re.search(r"facetime|anruf|call|iphone|audio|video", text, re.I):
+            return text
+    return "unbekannt"
+
+
+def anruf_pruefen() -> None:
+    """Ein Durchgang der Anrufüberwachung: Klingeln ansagen, nach dem Gespräch fortsetzen."""
+    fenster = anrufanzeige()
+    knoepfe = {k for _, ks, _ in fenster for k in ks}
+    klingelt = bool(knoepfe & set(ANNEHMEN))
+    if klingelt and not ANRUF["klingelt"]:
+        texte = next(ts for _, ks, ts in fenster if set(ks) & set(ANNEHMEN))
+        ANRUF["anrufer"] = anrufer_aus(texte)
+        melde_status(f"Anruf von {ANRUF['anrufer']}")
+        sprich(f"Anruf von {ANRUF['anrufer']}.")
+    ANRUF["klingelt"] = klingelt
+    if ANRUF["pausiert_seit"]:  # Gespräch läuft, von Atlas pausiert
+        if knoepfe & set(AUFLEGEN):
+            ANRUF["auflegen_gesehen"] = True
+        elif ANRUF["auflegen_gesehen"] or time.time() - ANRUF["pausiert_seit"] > 3 * 3600:
+            ANRUF.update(pausiert_seit=0.0, auflegen_gesehen=False)  # Gespräch vorbei
+            PAUSIERT.clear()
+        elif time.time() - ANRUF["pausiert_seit"] > 20:
+            melde_status("Pausiert wegen Anruf (im Menü fortsetzen)")
+
+
+def anruf_berechtigung_fehlt(fehler: str) -> str:
+    """Welche Berechtigung fehlt, laut AppleScript-Fehler; leer, wenn es ein anderer Fehler ist."""
+    if "-1743" in fehler:
+        return "Steuerung von Systemereignissen"
+    if "-1719" in fehler or "-25211" in fehler or "assistive" in fehler.lower():
+        return "Bedienungshilfen"
+    return ""
+
+
+def anruf_ueberwachung() -> None:
+    while True:
+        try:
+            anruf_pruefen()
+        except RuntimeError as fehler:  # meist fehlende Berechtigungen; dann nicht jede Sekunde ins Log schreiben
+            fehlt = anruf_berechtigung_fehlt(str(fehler))
+            if fehlt:
+                melde_status(f"Anrufe: {fehlt} für heyAtlas fehlt")
+                time.sleep(30)
+            else:
+                print(f"Anrufüberwachung: {fehler}", file=sys.stderr)
+        time.sleep(1.5)
+
+
+def anruf_annehmen() -> Optional[str]:
+    if not ANRUF["klingelt"]:
+        return None
+    if not osascript(ANRUF_KNOPF, *ANNEHMEN):
+        return "Ich finde den Knopf zum Annehmen nicht."
+    ANRUF.update(klingelt=False, pausiert_seit=time.time(), auflegen_gesehen=False)
+    PAUSIERT.set()  # während des Gesprächs nicht auf das Aktivierungswort hören
+    wiedergabe_pausiert()  # angehaltene Musik nach dem Annehmen nicht wieder starten
+    return ""  # nichts sagen, das Gespräch beginnt
+
+
+def anruf_ablehnen() -> Optional[str]:
+    if not ANRUF["klingelt"]:
+        return None
+    ANRUF["klingelt"] = False
+    return "Abgelehnt." if osascript(ANRUF_KNOPF, *ABLEHNEN) else "Ich finde den Knopf zum Ablehnen nicht."
+
+
+def bedienungshilfen_erlaubt(nachfragen: bool = False) -> bool:
+    """Mit nachfragen=True zeigt macOS den Dialog, der zu den Bedienungshilfen-Einstellungen führt."""
+    import ApplicationServices
+
+    if nachfragen:
+        return bool(ApplicationServices.AXIsProcessTrustedWithOptions(
+            {ApplicationServices.kAXTrustedCheckOptionPrompt: True}))
+    return bool(ApplicationServices.AXIsProcessTrusted())
 
 
 # ---------------------------------------------------------------- Kurzbefehle (z. B. Home-Szenen)
@@ -1934,6 +2258,12 @@ WERKZEUGE = [erinnerung_anlegen, erinnerungen_lesen, erinnerung_abhaken,
              apple_music_abspielen, apple_music_steuern, youtube_abspielen, youtube_steuern,
              abfahrten, verbindung_suchen,
              notiz_anlegen, notizen_suchen, nachricht_senden, kurzbefehle_auflisten, kurzbefehl_ausfuehren]
+# Optionale Werkzeuge nur bei eingeschaltetem Schalter, sonst versucht Claude sie gar nicht erst
+if NACHRICHTEN_LESEN:
+    WERKZEUGE += [imessages_lesen, imessage_antworten]
+    SYSTEMPROMPT += ("\nFragt der Nutzer nach Nachrichten von Personen („Hab ich neue Nachrichten?“, „Was hat Anna "
+                     "geschrieben?“), sind iMessages und SMS gemeint: nutze imessages_lesen. Das Werkzeug nachrichten "
+                     "ist nur für Schlagzeilen der Tagesschau.")
 
 
 # ---------------------------------------------------------------- Schnellbefehle ohne Claude
@@ -1969,6 +2299,8 @@ SCHNELL_TEXTE = {
               "wie heißt das lied"},
     "timer_abfragen": {"wie lange noch", "wie lange läuft der timer noch", "wie lange dauert der timer noch"},
     "timer_abbrechen": {"timer abbrechen", "brich den timer ab", "timer löschen", "lösch den timer"},
+    "anruf_annehmen": {"nimm an", "annehmen", "anruf annehmen", "nimm den anruf an", "geh ran", "abnehmen"},
+    "anruf_ablehnen": {"lehn ab", "ablehnen", "anruf ablehnen", "lehn den anruf ab", "drück weg", "wegdrücken"},
 }
 
 # "timer auf zehn minuten", "stell einen timer für 5 minuten für die nudeln", "zehn minuten timer"
@@ -2073,6 +2405,9 @@ SCHNELL_AKTIONEN = {
     "titel": _schnell_titel,
     "timer_abfragen": _schnell_timer_abfragen,
     "timer_abbrechen": _schnell_timer_abbrechen,
+    # Greifen nur, solange es klingelt (sonst None, dann übernimmt Claude)
+    "anruf_annehmen": lambda: anruf_annehmen(),
+    "anruf_ablehnen": lambda: anruf_ablehnen(),
 }
 
 
@@ -2177,14 +2512,18 @@ def eine_runde(folgefrage: bool) -> bool:
     _wiedergabe_pausiert.clear()
     try:
         if text:
-            sprich(schnellbefehl(text) or ask(text))
+            antwort = schnellbefehl(text)
+            if antwort is None:
+                antwort = ask(text)
+            if antwort:  # leer heißt schweigen, z. B. beim Annehmen eines Anrufs
+                sprich(antwort)
     finally:
         fortsetzen = _angehalten and not (_wiedergabe_gestartet.is_set() or _wiedergabe_pausiert.is_set())
         if fortsetzen:
             wiedergabe_fortsetzen(list(_angehalten))
         _angehalten.clear()
-    if not text or fortsetzen or _wiedergabe_gestartet.is_set():
-        return False  # läuft wieder etwas, kein Nachhören: der Ton landete sonst in der Aufnahme
+    if not text or fortsetzen or _wiedergabe_gestartet.is_set() or PAUSIERT.is_set():
+        return False  # läuft wieder etwas oder ein Anruf, kein Nachhören: der Ton landete sonst in der Aufnahme
     return MODUS == "wake" and NACHFRAGE_SEK > 0 and not musik_laeuft()
 
 
@@ -2207,6 +2546,8 @@ def main() -> None:
             print()
         return
     threading.Thread(target=uhr_schleife, daemon=True).start()
+    if ANRUFE_ANNEHMEN:
+        threading.Thread(target=anruf_ueberwachung, daemon=True).start()
     if not TEXTMODUS:
         lade_whisper()  # vorab laden, damit die erste Antwort nicht hängt
         if not STIMME.startswith(MACOS_PRAEFIX):
