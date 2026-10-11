@@ -10,6 +10,7 @@ Start:  python3 assistent.py          (Wake-Word, Aufnahme endet bei einer Sprec
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -30,6 +31,7 @@ MODELL = os.environ.get("CLAUDE_MODELL", "claude-sonnet-5")  # gemessen etwa dop
 STIMME = os.environ.get("STIMME", os.path.join(ORDNER, "stimmen", "de_DE-thorsten-medium.onnx"))
 KALENDER = os.environ.get("KALENDER", "")  # leer = erster beschreibbarer Kalender
 HEIMATORT = os.environ.get("HEIMATORT", "")  # Ort für Wetterfragen ohne Ortsangabe
+BROWSER = os.environ.get("BROWSER", "Safari")  # für YouTube: "Safari" oder "Google Chrome"
 WHISPER_MODELL = os.environ.get("WHISPER_MODELL", "mlx-community/whisper-small-mlx")
 ABTASTRATE = 16000
 
@@ -51,7 +53,14 @@ Nutze die Werkzeuge für Erinnerungen und Kalender. Wenn Datum oder Uhrzeit unkl
 statt zu raten. Um einen Termin zu verschieben oder zu löschen, lies ihn zuerst mit termine_lesen und nutze
 dessen Kennung wie T1. Für Musik nutze die Spotify-Werkzeuge, fürs Wetter das Wetter-Werkzeug; nenne Temperaturen
 gerundet und ohne Nachkommastellen. Für Licht, Heizung und andere Abläufe nutze die Kurzbefehle; schau mit
-kurzbefehle_auflisten nach, welche es gibt. Für Timer und Wecker nutze die Timer- und Wecker-Werkzeuge. Sprich Uhrzeiten natürlich aus, etwa "um halb drei" oder "um 14 Uhr"."""
+kurzbefehle_auflisten nach, welche es gibt. Für Timer und Wecker nutze die Timer- und Wecker-Werkzeuge. Sprich Uhrzeiten
+natürlich aus, etwa "um halb drei" oder "um 14 Uhr".
+Musik spielst du über Spotify, außer der Nutzer nennt ausdrücklich Apple Music. Für aktuelle Fakten, die kein anderes
+Werkzeug liefert, nutze die Websuche; nenne danach nur das Wichtigste in ein bis zwei Sätzen, ohne Quellen. Mails und Nachrichten verschickst du nur, wenn der Nutzer es ausdrücklich will;
+sonst legst du einen Entwurf an.
+Sagt der Nutzer "Guten Morgen" oder bittet um ein Briefing, hole parallel das Wetter, die Termine von heute, die
+Wecker und die Nachrichten und fasse alles in drei bis vier Sätzen zusammen, Nachrichten nur mit den zwei
+wichtigsten Schlagzeilen."""
 
 SCHLUESSELBUND_DIENST = "anthropic-api-key"
 
@@ -262,53 +271,130 @@ def datum_teile(iso: str) -> list:
 # ---------------------------------------------------------------- Werkzeuge
 
 @beta_tool
-def erinnerung_anlegen(titel: str, faellig: Optional[str] = None) -> str:
+def erinnerung_anlegen(titel: str, faellig: Optional[str] = None, liste: Optional[str] = None) -> str:
     """Legt eine Erinnerung in der Erinnerungen-App an.
 
     Args:
         titel: Text der Erinnerung.
         faellig: Optionaler Zeitpunkt im ISO-Format, z. B. 2026-10-11T09:00.
+        liste: Optionale Liste, z. B. "Einkauf"; weglassen für die Standardliste.
     """
-    if faellig:
-        skript = DATUM_HELFER + """
+    # Leere Werte als Platzhalter, damit die argv-Positionen im Skript fest bleiben
+    teile = datum_teile(faellig) if faellig else ["", "", "", "", ""]
+    skript = DATUM_HELFER + """
 on run argv
-    set dt to mkdate(item 2 of argv, item 3 of argv, item 4 of argv, item 5 of argv, item 6 of argv)
-    tell application "Reminders" to make new reminder with properties {name:(item 1 of argv), remind me date:dt}
+    if (item 3 of argv) is not "" then
+        set dt to mkdate(item 3 of argv, item 4 of argv, item 5 of argv, item 6 of argv, item 7 of argv)
+    end if
+    tell application "Reminders"
+        -- "remind me date" ist Vokabular der Erinnerungen-App und muss innerhalb von tell stehen
+        if (item 3 of argv) is "" then
+            set eigenschaften to {name:(item 1 of argv)}
+        else
+            set eigenschaften to {name:(item 1 of argv), remind me date:dt}
+        end if
+        if (item 2 of argv) is "" then
+            make new reminder with properties eigenschaften
+        else
+            make new reminder at end of reminders of list (item 2 of argv) with properties eigenschaften
+        end if
+    end tell
 end run"""
-        osascript(skript, titel, *datum_teile(faellig))
-    else:
-        osascript('on run argv\ntell application "Reminders" to make new reminder '
-                  'with properties {name:(item 1 of argv)}\nend run', titel)
-    return f"Erinnerung '{titel}' angelegt."
+    osascript(skript, titel, liste or "", *teile)
+    return f"Erinnerung '{titel}' angelegt" + (f" in der Liste {liste}." if liste else ".")
 
 
-_kalender = None
+_eventkit = None
+_eventkit_freigaben: set = set()
 
 
-def kalender_speicher():
-    """EventKit-Zugang zum Kalender, schneller als die Kalender-App per AppleScript fernzusteuern."""
-    import threading
-
+def kalender_speicher(art: str = "termine"):
+    """EventKit-Zugang zu Kalender ("termine") oder Erinnerungen ("erinnerungen").
+    Schneller als die Apps per AppleScript fernzusteuern."""
     import EventKit
 
-    global _kalender
-    if _kalender is None:
-        speicher = EventKit.EKEventStore.alloc().init()
-        status = EventKit.EKEventStore.authorizationStatusForEntityType_(EventKit.EKEntityTypeEvent)
-        if status != EventKit.EKAuthorizationStatusFullAccess:
+    global _eventkit
+    if _eventkit is None:
+        _eventkit = EventKit.EKEventStore.alloc().init()
+    if art not in _eventkit_freigaben:
+        typ, anfrage, name = {
+            "termine": (EventKit.EKEntityTypeEvent, "requestFullAccessToEventsWithCompletion_", "Kalender"),
+            "erinnerungen": (EventKit.EKEntityTypeReminder, "requestFullAccessToRemindersWithCompletion_",
+                             "Erinnerungen"),
+        }[art]
+        if EventKit.EKEventStore.authorizationStatusForEntityType_(typ) != EventKit.EKAuthorizationStatusFullAccess:
             fertig, ergebnis = threading.Event(), {}
 
             def antwort(erlaubt, _fehler):
                 ergebnis["erlaubt"] = erlaubt
                 fertig.set()
 
-            speicher.requestFullAccessToEventsWithCompletion_(antwort)
+            getattr(_eventkit, anfrage)(antwort)
             fertig.wait(120)
             if not ergebnis.get("erlaubt"):
-                raise RuntimeError("Kein Kalenderzugriff. Systemeinstellungen → Datenschutz & Sicherheit → "
-                                   "Kalender → Terminal auf „Vollzugriff“ stellen.")
-        _kalender = speicher
-    return _kalender
+                raise RuntimeError(f"Kein Zugriff auf {name}. Systemeinstellungen → Datenschutz & Sicherheit → "
+                                   f"{name} → Terminal auf „Vollzugriff“ stellen.")
+        _eventkit_freigaben.add(art)
+    return _eventkit
+
+
+_letzte_erinnerungen: dict = {}
+
+
+@beta_tool
+def erinnerungen_lesen(liste: Optional[str] = None) -> str:
+    """Liest offene Erinnerungen, z. B. die Einkaufsliste. Jede bekommt eine Kennung wie E1 zum Abhaken.
+
+    Args:
+        liste: Name der Liste, z. B. "Einkauf"; weglassen für alle Listen.
+    """
+    import EventKit
+
+    speicher = kalender_speicher("erinnerungen")
+    listen = list(speicher.calendarsForEntityType_(EventKit.EKEntityTypeReminder))
+    if liste:
+        passend = [k for k in listen if k.title().lower() == liste.lower()] or \
+                  [k for k in listen if liste.lower() in k.title().lower()]
+        if not passend:
+            return f"Keine Liste '{liste}'. Vorhanden: {', '.join(k.title() for k in listen)}"
+        listen = passend
+    abfrage = speicher.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(None, None, listen)
+    fertig, ergebnis = threading.Event(), {}
+
+    def antwort(erinnerungen):
+        ergebnis["liste"] = list(erinnerungen or [])
+        fertig.set()
+
+    speicher.fetchRemindersMatchingPredicate_completion_(abfrage, antwort)
+    fertig.wait(30)
+    _letzte_erinnerungen.clear()
+    zeilen = []
+    for nummer, r in enumerate(ergebnis.get("liste", []), 1):
+        _letzte_erinnerungen[f"E{nummer}"] = r
+        faellig = r.dueDateComponents()
+        wann = ""
+        if faellig is not None and faellig.date() is not None:
+            wann = f" | fällig {datetime.fromtimestamp(faellig.date().timeIntervalSince1970()):%Y-%m-%d %H:%M}"
+        zeilen.append(f"[E{nummer}] {r.title()} | {r.calendar().title()}{wann}")
+    return "\n".join(zeilen) or "Keine offenen Erinnerungen."
+
+
+@beta_tool
+def erinnerung_abhaken(kennung: str) -> str:
+    """Hakt eine zuvor mit erinnerungen_lesen gelesene Erinnerung als erledigt ab.
+
+    Args:
+        kennung: Kennung aus erinnerungen_lesen, z. B. E3.
+    """
+    r = _letzte_erinnerungen.get(kennung.strip().upper())
+    if r is None:
+        return f"Unbekannte Kennung {kennung}. Lies die Erinnerungen zuerst mit erinnerungen_lesen."
+    r.setCompleted_(True)
+    ok, fehler = kalender_speicher("erinnerungen").saveReminder_commit_error_(r, True, None)
+    if not ok:
+        raise RuntimeError(f"Erinnerungen hat abgelehnt: {fehler.localizedDescription() if fehler else 'unbekannt'}")
+    _letzte_erinnerungen.pop(kennung.strip().upper(), None)
+    return f"'{r.title()}' abgehakt."
 
 
 @beta_tool
@@ -870,7 +956,46 @@ end run""", suche)
     return ergebnis[:4000] or f"Keine Notiz mit '{suche}' im Titel."
 
 
-# ---------------------------------------------------------------- Nachrichten
+# ---------------------------------------------------------------- iMessage
+
+def kontakte_suchen(name: str) -> list:
+    """Sucht in der Kontakte-App. Liefert [(Name, [Telefonnummern], [E-Mail-Adressen])]."""
+    treffer = osascript("""on run argv
+    set ausgabe to ""
+    tell application "Contacts"
+        repeat with p in (people whose name contains (item 1 of argv))
+            set nummern to ""
+            repeat with t in phones of p
+                set nummern to nummern & (value of t) & ";"
+            end repeat
+            set mails to ""
+            repeat with m in emails of p
+                set mails to mails & (value of m) & ";"
+            end repeat
+            set ausgabe to ausgabe & (name of p) & "|" & nummern & "|" & mails & linefeed
+        end repeat
+    end tell
+    return ausgabe
+end run""", name)
+    kontakte = []
+    for zeile in treffer.splitlines():
+        if zeile.count("|") == 2:
+            n, nummern, mails = zeile.split("|")
+            kontakte.append((n, [x for x in nummern.split(";") if x], [x for x in mails.split(";") if x]))
+    return kontakte
+
+
+def eindeutiger_kontakt(name: str, nur_mail: bool = False):
+    """Ein passender Kontakt mit Adresse, oder ein Text für Claude, warum nicht."""
+    kontakte = [(n, (m if nur_mail else t + m)) for n, t, m in kontakte_suchen(name)]
+    kontakte = [(n, adressen) for n, adressen in kontakte if adressen]
+    art = "E-Mail-Adresse" if nur_mail else "Telefonnummer oder E-Mail"
+    if not kontakte:
+        return None, f"Kein Kontakt '{name}' mit {art} gefunden."
+    if len(kontakte) > 1:
+        return None, "Mehrere Kontakte passen, frag nach, wer gemeint ist: " + ", ".join(n for n, _ in kontakte[:6])
+    return kontakte[0], ""
+
 
 @beta_tool
 def nachricht_senden(empfaenger: str, text: str) -> str:
@@ -880,30 +1005,10 @@ def nachricht_senden(empfaenger: str, text: str) -> str:
         empfaenger: Name des Kontakts, wie er in Kontakte steht, z. B. "Anna" oder "Anna Müller".
         text: Text der Nachricht.
     """
-    treffer = osascript("""on run argv
-    set ausgabe to ""
-    tell application "Contacts"
-        repeat with p in (people whose name contains (item 1 of argv))
-            set adressen to ""
-            repeat with t in phones of p
-                set adressen to adressen & (value of t) & ";"
-            end repeat
-            repeat with m in emails of p
-                set adressen to adressen & (value of m) & ";"
-            end repeat
-            set ausgabe to ausgabe & (name of p) & "|" & adressen & linefeed
-        end repeat
-    end tell
-    return ausgabe
-end run""", empfaenger)
-    kontakte = [z.split("|", 1) for z in treffer.splitlines() if "|" in z]
-    kontakte = [(name, [a for a in adressen.split(";") if a]) for name, adressen in kontakte]
-    kontakte = [(name, adressen) for name, adressen in kontakte if adressen]
-    if not kontakte:
-        return f"Kein Kontakt '{empfaenger}' mit Telefonnummer oder E-Mail gefunden."
-    if len(kontakte) > 1:
-        return "Mehrere Kontakte passen, frag nach, wer gemeint ist: " + ", ".join(n for n, _ in kontakte[:6])
-    name, adressen = kontakte[0]
+    kontakt, problem = eindeutiger_kontakt(empfaenger)
+    if not kontakt:
+        return problem
+    name, adressen = kontakt
     if not bestaetigen(f"Soll ich {name} schreiben: {text}?"):
         return "Der Nutzer hat abgelehnt, die Nachricht wurde nicht gesendet."
     osascript("""on run argv
@@ -913,6 +1018,307 @@ end run""", empfaenger)
     end tell
 end run""", adressen[0], text)
     return f"Nachricht an {name} gesendet."
+
+
+# ---------------------------------------------------------------- Mail
+
+_letzte_mails: dict = {}  # Kennung M1… -> Mail-ID im Posteingang
+
+
+@beta_tool
+def mails_lesen(anzahl: int = 10) -> str:
+    """Liest ungelesene Mails im Posteingang (Absender, Betreff, Datum, Anfang des Textes). Kennungen wie M1
+    dienen zum Antworten.
+
+    Args:
+        anzahl: Höchstens so viele Mails, neueste zuerst.
+    """
+    roh = osascript("""on run argv
+    set feld to character id 31
+    set satz to character id 30
+    set ausgabe to ""
+    set anzahl to 0
+    tell application "Mail"
+        repeat with m in (messages of inbox whose read status is false)
+            set inhalt to content of m
+            if (length of inhalt) > 400 then set inhalt to text 1 thru 400 of inhalt
+            set ausgabe to ausgabe & (id of m) & feld & (sender of m) & feld & (subject of m) & feld & ¬
+                ((date received of m) as «class isot» as string) & feld & inhalt & satz
+            set anzahl to anzahl + 1
+            if anzahl ≥ (item 1 of argv as integer) then exit repeat
+        end repeat
+    end tell
+    return ausgabe
+end run""", str(max(1, min(anzahl, 25))))
+    mails = [s.split("\x1f") for s in roh.split("\x1e") if s.count("\x1f") == 4]
+    mails.sort(key=lambda m: m[3], reverse=True)
+    _letzte_mails.clear()
+    zeilen = []
+    for nummer, (mail_id, absender, betreff, datum, inhalt) in enumerate(mails, 1):
+        _letzte_mails[f"M{nummer}"] = mail_id
+        inhalt = " ".join(inhalt.split())
+        zeilen.append(f"[M{nummer}] {datum[:16].replace('T', ' ')} | von {absender} | {betreff}\n    {inhalt}")
+    return "\n".join(zeilen) or "Keine ungelesenen Mails."
+
+
+@beta_tool
+def mail_antworten(kennung: str, text: str, senden: bool = False) -> str:
+    """Antwortet auf eine mit mails_lesen gelesene Mail. Standard ist ein Entwurf, der offen in Mail liegt;
+    mit senden=True wird nach Rückfrage per Sprache sofort gesendet.
+
+    Args:
+        kennung: Kennung aus mails_lesen, z. B. M2.
+        text: Antworttext.
+        senden: Nur True, wenn der Nutzer ausdrücklich sofort senden will.
+    """
+    mail_id = _letzte_mails.get(kennung.strip().upper())
+    if mail_id is None:
+        return f"Unbekannte Kennung {kennung}. Lies die Mails zuerst mit mails_lesen."
+    if senden and not bestaetigen(f"Soll ich die Antwort jetzt senden: {text}?"):
+        senden = False
+    osascript("""on run argv
+    tell application "Mail"
+        set m to first message of inbox whose id is ((item 1 of argv) as integer)
+        set r to reply m with opening window
+        delay 0.5
+        set content of r to (item 2 of argv) & return & return & (content of r)
+        if (item 3 of argv) is "1" then send r
+    end tell
+end run""", mail_id, text, "1" if senden else "0")
+    return "Antwort gesendet." if senden else "Antwort liegt als Entwurf offen in Mail."
+
+
+@beta_tool
+def mail_schreiben(empfaenger: str, betreff: str, text: str, senden: bool = False) -> str:
+    """Schreibt eine neue Mail. Standard ist ein Entwurf, der offen in Mail liegt; mit senden=True wird nach
+    Rückfrage per Sprache sofort gesendet.
+
+    Args:
+        empfaenger: Name aus den Kontakten oder eine E-Mail-Adresse.
+        betreff: Betreff.
+        text: Text der Mail.
+        senden: Nur True, wenn der Nutzer ausdrücklich sofort senden will.
+    """
+    if "@" in empfaenger:
+        name, adresse = empfaenger, empfaenger
+    else:
+        kontakt, problem = eindeutiger_kontakt(empfaenger, nur_mail=True)
+        if not kontakt:
+            return problem
+        name, adresse = kontakt[0], kontakt[1][0]
+    if senden and not bestaetigen(f"Soll ich die Mail an {name} mit dem Betreff {betreff} jetzt senden?"):
+        senden = False
+    osascript("""on run argv
+    tell application "Mail"
+        set r to make new outgoing message with properties {subject:(item 2 of argv), content:(item 3 of argv), visible:true}
+        tell r to make new to recipient at end of to recipients with properties {address:(item 1 of argv)}
+        if (item 4 of argv) is "1" then send r
+    end tell
+end run""", adresse, betreff, text, "1" if senden else "0")
+    return f"Mail an {name} gesendet." if senden else f"Entwurf an {name} liegt offen in Mail."
+
+
+# ---------------------------------------------------------------- Mac-Steuerung
+
+@beta_tool
+def lautstaerke(prozent: Optional[int] = None,
+                aktion: Optional[Literal["lauter", "leiser", "stumm", "ton_an"]] = None) -> str:
+    """Stellt die Systemlautstärke des Macs.
+
+    Args:
+        prozent: Lautstärke 0 bis 100; oder stattdessen eine aktion.
+        aktion: lauter, leiser (je 10 Prozentpunkte), stumm, ton_an.
+    """
+    if prozent is not None:
+        osascript(f"set volume output volume {max(0, min(int(prozent), 100))}")
+    elif aktion in ("lauter", "leiser"):
+        schritt = 10 if aktion == "lauter" else -10
+        osascript(f"set volume output volume ((output volume of (get volume settings)) + {schritt})")
+    elif aktion == "stumm":
+        osascript("set volume with output muted")
+    elif aktion == "ton_an":
+        osascript("set volume without output muted")
+    else:
+        return "Gib prozent oder aktion an."
+    return f"Lautstärke jetzt {osascript('output volume of (get volume settings)')} Prozent."
+
+
+@beta_tool
+def app_oeffnen(name: str) -> str:
+    """Öffnet ein Programm auf dem Mac, z. B. "Safari" oder "Notizen".
+
+    Args:
+        name: Name des Programms, wie er im Programme-Ordner steht.
+    """
+    ergebnis = subprocess.run(["open", "-a", name], capture_output=True, text=True)
+    return f"{name} ist offen." if ergebnis.returncode == 0 else f"Programm '{name}' nicht gefunden."
+
+
+@beta_tool
+def app_beenden(name: str) -> str:
+    """Beendet ein laufendes Programm. Das Programm fragt selbst nach, falls etwas ungesichert ist.
+
+    Args:
+        name: Name des Programms.
+    """
+    lief = osascript("""on run argv
+    if application (item 1 of argv) is running then
+        tell application (item 1 of argv) to quit
+        return "ja"
+    end if
+    return "nein"
+end run""", name)
+    return f"{name} beendet." if lief == "ja" else f"{name} läuft gar nicht."
+
+
+@beta_tool
+def dunkelmodus(modus: Literal["an", "aus", "umschalten"] = "umschalten") -> str:
+    """Schaltet den Dunkelmodus von macOS.
+
+    Args:
+        modus: an, aus oder umschalten.
+    """
+    wert = {"an": "true", "aus": "false", "umschalten": "not dark mode"}[modus]
+    osascript(f'tell application "System Events" to tell appearance preferences to set dark mode to {wert}')
+    return "Dunkelmodus ist " + ("an." if osascript(
+        'tell application "System Events" to tell appearance preferences to get dark mode') == "true" else "aus.")
+
+
+@beta_tool
+def bildschirm_sperren() -> str:
+    """Schaltet den Bildschirm aus; mit Passwortabfrage beim Aufwachen ist der Mac damit gesperrt."""
+    subprocess.run(["pmset", "displaysleepnow"], check=True)
+    return "Bildschirm ist aus."
+
+
+# ---------------------------------------------------------------- Apple Music (eigene Mediathek)
+
+@beta_tool
+def apple_music_abspielen(suche: str) -> str:
+    """Spielt einen Titel oder Künstler aus der eigenen Apple-Music-Mediathek. Der Streaming-Katalog ist per
+    AppleScript nicht erreichbar.
+
+    Args:
+        suche: Teil des Titels oder Künstlernamens.
+    """
+    ergebnis = osascript("""on run argv
+    tell application "Music"
+        set treffer to (every track of library playlist 1 whose name contains (item 1 of argv) or artist contains (item 1 of argv))
+        if treffer is {} then return ""
+        play item 1 of treffer
+        return (name of item 1 of treffer) & " von " & (artist of item 1 of treffer)
+    end tell
+end run""", suche)
+    return f"Spiele {ergebnis}." if ergebnis else f"Nichts in der Mediathek gefunden für '{suche}'."
+
+
+MUSIC_BEFEHLE = {
+    "play": "play", "pause": "pause", "weiter": "next track", "zurueck": "previous track",
+    "lauter": "set sound volume to (sound volume + 15)", "leiser": "set sound volume to (sound volume - 15)",
+}
+
+
+@beta_tool
+def apple_music_steuern(aktion: Literal["play", "pause", "weiter", "zurueck", "lauter", "leiser"]) -> str:
+    """Steuert die Wiedergabe in der Musik-App (Apple Music).
+
+    Args:
+        aktion: play, pause, weiter, zurueck, lauter, leiser.
+    """
+    osascript(f'tell application "Music" to {MUSIC_BEFEHLE[aktion]}')
+    return f"Erledigt: {aktion}."
+
+
+# ---------------------------------------------------------------- YouTube
+
+@beta_tool
+def youtube_abspielen(suche: str) -> str:
+    """Sucht ein YouTube-Video über die offizielle YouTube Data API und öffnet es im Browser.
+
+    Args:
+        suche: Suchbegriff, z. B. "Tagesschau in 100 Sekunden" oder "Pasta Carbonara Rezept".
+    """
+    schluessel = schluesselbund("youtube-api-key")
+    if not schluessel:
+        raise RuntimeError("YouTube-API-Schlüssel fehlt im Schlüsselbund (youtube-api-key).")
+    url = "https://www.googleapis.com/youtube/v3/search?" + urllib.parse.urlencode({
+        "part": "snippet", "q": suche, "type": "video", "maxResults": 1,
+        "regionCode": "DE", "relevanceLanguage": "de", "key": schluessel})
+    treffer = hole_json(url).get("items", [])
+    if not treffer:
+        return f"Kein Video gefunden für '{suche}'."
+    video = treffer[0]
+    subprocess.run(["open", "-a", BROWSER, f"https://www.youtube.com/watch?v={video['id']['videoId']}"], check=True)
+    s = video["snippet"]
+    return f"Öffne '{s['title']}' vom Kanal {s['channelTitle']}."
+
+
+YOUTUBE_JS = {
+    "pause": "v.pause()", "play": "v.play()",
+    "vor": "v.currentTime += 10", "zurueck": "v.currentTime -= 10",
+    "lauter": "v.volume = Math.min(1, v.volume + 0.2)", "leiser": "v.volume = Math.max(0, v.volume - 0.2)",
+    # Browser erlauben Vollbild oft nur nach echter Nutzeraktion; dann passiert hier nichts
+    "vollbild": "document.querySelector('.ytp-fullscreen-button').click()",
+}
+
+
+@beta_tool
+def youtube_steuern(aktion: Literal["pause", "play", "vor", "zurueck", "lauter", "leiser", "vollbild"]) -> str:
+    """Steuert das offene YouTube-Video im Browser.
+
+    Args:
+        aktion: pause, play, vor (10 Sekunden), zurueck (10 Sekunden), lauter, leiser, vollbild.
+    """
+    js = ("(function(){var v=document.querySelector('video'); if(!v) return 'kein Video';"
+          + YOUTUBE_JS[aktion] + "; return 'ok';})()")
+    if BROWSER == "Google Chrome":
+        skript = """on run argv
+    tell application "Google Chrome"
+        repeat with w in windows
+            repeat with t in tabs of w
+                if URL of t contains "youtube.com/watch" then return execute t javascript (item 1 of argv)
+            end repeat
+        end repeat
+    end tell
+    return "kein Tab"
+end run"""
+    else:
+        skript = """on run argv
+    tell application "Safari"
+        repeat with w in windows
+            repeat with t in tabs of w
+                if URL of t contains "youtube.com/watch" then return do JavaScript (item 1 of argv) in t
+            end repeat
+        end repeat
+    end tell
+    return "kein Tab"
+end run"""
+    try:
+        ergebnis = osascript(skript, js)
+    except RuntimeError as fehler:
+        if "JavaScript" in str(fehler):
+            raise RuntimeError(f"{BROWSER} erlaubt keine Steuerung. Einmalig einschalten: Safari → Einstellungen → "
+                               "Erweitert → Funktionen für Webentwickler zeigen, dann Menü Entwickler → "
+                               "JavaScript von Apple Events erlauben.") from fehler
+        raise
+    return {"ok": f"Erledigt: {aktion}.", "kein Tab": "Es ist kein YouTube-Video offen.",
+            "kein Video": "Auf der Seite läuft kein Video."}.get(ergebnis, ergebnis)
+
+
+# ---------------------------------------------------------------- Nachrichten (Tagesschau)
+
+@beta_tool
+def nachrichten(anzahl: int = 5) -> str:
+    """Aktuelle Schlagzeilen der Tagesschau mit dem ersten Satz.
+
+    Args:
+        anzahl: Anzahl Meldungen, 1 bis 10.
+    """
+    # Ohne Schrägstrich am Ende: mit Schrägstrich leitet der Server per 308 um, das kann urllib unter Python 3.9 nicht
+    daten = hole_json("https://www.tagesschau.de/api2u/homepage", headers={"User-Agent": "heyAtlas/1.0"})
+    zeilen = [f"- {n['title']}: {n.get('firstSentence') or n.get('topline') or ''}".strip()
+              for n in daten.get("news", [])[:max(1, min(anzahl, 10))]]
+    return "\n".join(zeilen) or "Keine Nachrichten abrufbar."
 
 
 # ---------------------------------------------------------------- Kurzbefehle (z. B. Home-Szenen)
@@ -954,10 +1360,20 @@ def kurzbefehl_ausfuehren(name: str) -> str:
     return f"Kurzbefehl '{passend[0]}' ausgeführt. {ergebnis.stdout.strip()}".strip()
 
 
-WERKZEUGE = [erinnerung_anlegen, termine_lesen, termin_anlegen, termin_verschieben, termin_loeschen,
-             spotify_abspielen, spotify_steuern, spotify_aktueller_titel, wetter,
+# Claudes eingebaute Websuche, läuft auf den Servern von Anthropic
+WEBSUCHE = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
+if HEIMATORT:
+    WEBSUCHE["user_location"] = {"type": "approximate", "city": HEIMATORT, "country": "DE",
+                                 "timezone": "Europe/Berlin"}
+
+WERKZEUGE = [erinnerung_anlegen, erinnerungen_lesen, erinnerung_abhaken,
+             termine_lesen, termin_anlegen, termin_verschieben, termin_loeschen,
+             spotify_abspielen, spotify_steuern, spotify_aktueller_titel, wetter, nachrichten,
              timer_stellen, timer_abfragen, timer_abbrechen, klingeln_stoppen,
              wecker_stellen, wecker_auflisten, wecker_loeschen,
+             mails_lesen, mail_antworten, mail_schreiben,
+             lautstaerke, app_oeffnen, app_beenden, dunkelmodus, bildschirm_sperren,
+             apple_music_abspielen, apple_music_steuern, youtube_abspielen, youtube_steuern,
              notiz_anlegen, notizen_suchen, nachricht_senden, kurzbefehle_auflisten, kurzbefehl_ausfuehren]
 
 
@@ -969,22 +1385,34 @@ verlauf: list = []  # nur Text-Paare der letzten Runden, damit Rückfragen funkt
 def ask(text: str) -> str:
     jetzt = datetime.now().strftime("%A, %d.%m.%Y, %H:%M Uhr")
     nachricht = {"role": "user", "content": f"[Jetzt: {jetzt}]\n{text}"}
-    runner = client.beta.messages.tool_runner(
-        model=MODELL,
-        max_tokens=4000,
-        system=SYSTEMPROMPT,
-        output_config={"effort": "low"},  # kurze Antworten, wenig Wartezeit
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-        tools=WERKZEUGE,
-        messages=verlauf[-10:] + [nachricht],
-    )
-    letzte = None
-    for letzte in runner:
-        pass
+    gespraech = verlauf[-10:] + [nachricht]
+    # Eine lange Websuche kann mit pause_turn enden; der Python-Runner setzt das nicht selbst fort,
+    # deshalb wird das Gespräch mitgeschrieben und der Runner mit dem pausierten Zug neu gestartet
+    for _ in range(4):
+        runner = client.beta.messages.tool_runner(
+            model=MODELL,
+            max_tokens=4000,
+            system=SYSTEMPROMPT,
+            output_config={"effort": "low"},  # kurze Antworten, wenig Wartezeit
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            cache_control={"type": "ephemeral"},  # Werkzeuge und Systemprompt aus dem Cache: schneller, günstiger
+            tools=WERKZEUGE + [WEBSUCHE],
+            messages=gespraech,
+        )
+        letzte = None
+        for letzte in runner:
+            gespraech.append({"role": "assistant", "content": letzte.content})
+            werkzeug_antwort = runner.generate_tool_call_response()
+            if werkzeug_antwort is not None:
+                gespraech.append(werkzeug_antwort)
+        if letzte is None or letzte.stop_reason != "pause_turn":
+            break
     if letzte is None or letzte.stop_reason == "refusal":
         return "Dabei kann ich leider nicht helfen."
-    antwort = " ".join(b.text for b in letzte.content if b.type == "text").strip()
+    # Nach einer Websuche ist der Text in viele Blöcke mit Quellenangaben zerteilt; Leerraum glätten
+    antwort = " ".join(" ".join(b.text for b in letzte.content if b.type == "text").split())
+    antwort = re.sub(r"\s+([.,;:!?])", r"\1", antwort)
     verlauf.extend([nachricht, {"role": "assistant", "content": antwort or "(erledigt)"}])
     return antwort or "Erledigt."
 

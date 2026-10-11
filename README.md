@@ -34,6 +34,7 @@ mkdir -p stimmen && cd stimmen && ../.venv/bin/python -m piper.download_voices d
 | `CLAUDE_MODELL` | `claude-sonnet-5` | `claude-opus-5` ist gründlicher, aber etwa doppelt so langsam |
 | `STIMME` | `stimmen/de_DE-thorsten-medium.onnx` | Piper-Stimme; weitere laden mit `cd stimmen && ../.venv/bin/python -m piper.download_voices de_DE-kerstin-low` |
 | `KALENDER` | erster beschreibbarer | Kalender für neue Termine |
+| `BROWSER` | `Safari` | Browser für YouTube, alternativ `Google Chrome` |
 | `HEIMATORT` | leer | Ort für Wetterfragen ohne Ortsangabe, z. B. `Hamburg` |
 | `ANTHROPIC_WORKSPACE_ID` | leer | nur für API-Schlüssel ohne Workspace (Console → Settings → Workspaces) |
 | `NACHFRAGE_SEK` | `4` | so lange hört er nach einer Antwort ohne Wake-Word weiter, `0` = aus |
@@ -56,6 +57,13 @@ mkdir -p stimmen && cd stimmen && ../.venv/bin/python -m piper.download_voices d
 - `timer_stellen`, `timer_abfragen`, `timer_abbrechen`: mehrere benannte Timer gleichzeitig
 - `wecker_stellen`, `wecker_auflisten`, `wecker_loeschen`: einmalig oder an Wochentagen, gespeichert in `~/Library/Application Support/heyAtlas/wecker.json`
 - `klingeln_stoppen`: schaltet Wecker und Timer aus; im Sprachmodus reicht auch einfach „Hey Atlas“
+- `erinnerungen_lesen`, `erinnerung_abhaken`: offene Erinnerungen (z. B. Einkaufsliste) lesen und abhaken; `erinnerung_anlegen` kann eine Liste wählen
+- `mails_lesen`, `mail_antworten`, `mail_schreiben`: ungelesene Mails, Antworten und neue Mails als offener Entwurf; Senden nur auf ausdrücklichen Wunsch mit Rückfrage
+- `lautstaerke`, `app_oeffnen`, `app_beenden`, `dunkelmodus`, `bildschirm_sperren`: Mac-Steuerung
+- `apple_music_abspielen`, `apple_music_steuern`: eigene Mediathek in der Musik-App (Streaming-Katalog ist per AppleScript nicht erreichbar)
+- `youtube_abspielen`, `youtube_steuern`: Suche über die YouTube Data API, Wiedergabe im Browser
+- `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Weckern und Nachrichten
+- Websuche: Claudes eingebaute Websuche für aktuelle Fragen
 - `wetter`: aktuelles Wetter und bis zu 7 Tage Vorhersage von Open-Meteo (kostenlos, ohne Schlüssel)
 
 Spotify braucht Client ID und Secret einer App von developer.spotify.com im Schlüsselbund:
@@ -88,3 +96,14 @@ echo 'export WAKEWORD="$HOME/voiceAgent/stimmen/hey_atlas.onnx"' >> ~/.zshrc
 
 Legt `/etc/sudoers.d/heyatlas` an, das nur `pmset schedule wake …` und `pmset schedule cancel wake …` ohne Passwort erlaubt.
 Atlas weckt den Mac dann eine Minute vor jedem Wecker. Aus dem Ruhezustand klappt das, aus dem ausgeschalteten Zustand nicht.
+
+## YouTube
+
+API-Schlüssel in der Google Cloud Console anlegen (YouTube Data API v3 aktivieren) und speichern:
+
+```sh
+security add-generic-password -s youtube-api-key -a "$USER" -w
+```
+
+Zum Steuern (Pause, vor, zurück) in Safari einmalig: Einstellungen → Erweitert → „Funktionen für Webentwickler zeigen“,
+dann Menü Entwickler → „JavaScript von Apple Events erlauben“.
