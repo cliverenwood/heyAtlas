@@ -67,6 +67,7 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 - `youtube_abspielen`, `youtube_steuern`: Suche über die YouTube Data API, Wiedergabe im Browser
 - `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Weckern, Nachrichten und ungelesenen Mails (nur Anzahl und Betreffs)
 - Websuche: Claudes eingebaute Websuche für aktuelle Fragen
+- `abfahrten`, `verbindung_suchen`: Bus und Bahn mit Echtzeit über [Transitous](https://transitous.org) ([Datenquellen](https://transitous.org/sources/)); Heimathaltestelle und Kontaktangabe in den Einstellungen
 - `wetter`: aktuelles Wetter und bis zu 7 Tage Vorhersage von Open-Meteo (kostenlos, ohne Schlüssel)
 
 Spotify braucht Client ID und Secret einer App von developer.spotify.com im Schlüsselbund:

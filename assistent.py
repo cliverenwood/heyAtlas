@@ -60,6 +60,10 @@ STIMME = einstellung("STIMME", "de_DE-thorsten-medium")
 STIMMEN_ORDNER = os.path.join(DATENORDNER, "stimmen")
 KALENDER = einstellung("KALENDER", "")  # leer = erster beschreibbarer Kalender
 HEIMATORT = einstellung("HEIMATORT", "")  # Ort für Wetterfragen ohne Ortsangabe
+HEIMATHALTESTELLE = einstellung("HEIMATHALTESTELLE", "")  # z. B. "Leipzig, Breite Str."
+FAHRPLAN_STADT = einstellung("FAHRPLAN_STADT", "Leipzig")  # Haltestellennamen werden zuerst hier gesucht
+# Transitous verlangt eine Kontaktangabe im User-Agent: E-Mail oder Website
+FAHRPLAN_KONTAKT = einstellung("FAHRPLAN_KONTAKT", "+https://github.com/cliverenwood/heyAtlas")
 BROWSER = einstellung("BROWSER", "Safari")  # für YouTube: "Safari" oder "Google Chrome"
 if BROWSER not in ("Safari", "Google Chrome"):  # der Name landet im AppleScript, deshalb nur bekannte Werte
     BROWSER = "Safari"
@@ -94,6 +98,8 @@ Werkzeug liefert, nutze die Websuche; nenne danach nur das Wichtigste in ein bis
 Mails und Nachrichten verschickst du nur, wenn der Nutzer es ausdrücklich will; sonst legst du einen Entwurf an.
 Soll eine Mail vorgelesen werden, nenne Absender und Betreff und gib dann den Text von mail_vorlesen wörtlich
 wieder; das ist die Ausnahme von der Regel mit den kurzen Antworten.
+Für Bus und Bahn nutze abfahrten und verbindung_suchen; nenne Abfahrtszeiten natürlich und Verspätungen nur,
+wenn es welche gibt.
 Sagt der Nutzer "Guten Morgen" oder bittet um ein Briefing, hole parallel das Wetter, die Termine von heute, die
 Wecker, die Nachrichten und die ungelesenen Mails und fasse alles in vier bis fünf Sätzen zusammen: Nachrichten nur
 mit den zwei wichtigsten Schlagzeilen, Mails in einem einzigen Satz mit ihrer Anzahl und knapp den Betreffs der
@@ -1678,6 +1684,114 @@ def nachrichten(anzahl: int = 5) -> str:
     return "\n".join(zeilen) or "Keine Nachrichten abrufbar."
 
 
+# ---------------------------------------------------------------- Fahrplan (Transitous)
+
+# Freier, gemeinschaftlich betriebener Fahrplandienst mit Echtzeit. Nutzungsregeln: https://transitous.org/api/
+# (Open Source, nicht-kommerziell, wenig Last, Kontakt im User-Agent, Quellenangabe transitous.org/sources)
+TRANSITOUS = "https://api.transitous.org/api"
+
+
+def transitous(pfad: str, **parameter) -> dict:
+    url = f"{TRANSITOUS}/{pfad}?" + urllib.parse.urlencode({k: v for k, v in parameter.items() if v is not None})
+    return hole_json(url, headers={"User-Agent": f"heyAtlas/0.1 ({FAHRPLAN_KONTAKT})"})
+
+
+def ort_finden(name: str, nur_haltestellen: bool = False) -> Optional[dict]:
+    """Haltestelle oder Adresse; ohne Stadtangabe zuerst in FAHRPLAN_STADT gesucht."""
+    versuche = [name] if FAHRPLAN_STADT.lower() in name.lower() else [f"{FAHRPLAN_STADT} {name}", name]
+    for text in versuche:
+        treffer = transitous("v1/geocode", text=text, type="STOP" if nur_haltestellen else None)
+        if treffer:
+            return treffer[0]
+    return None
+
+
+def ort_parameter(ort: dict) -> str:
+    """Haltestellen über ihre Kennung, Adressen über ihre Koordinaten."""
+    return ort["id"] if ort.get("type") == "STOP" else f"{ort['lat']},{ort['lon']}"
+
+
+def ortszeit(zeit: str) -> datetime:
+    """Transitous liefert UTC ("…Z"); umgerechnet in die Zeitzone des Macs."""
+    return datetime.fromisoformat(zeit.replace("Z", "+00:00")).astimezone()
+
+
+def verspaetung(geplant: str, tatsaechlich: str) -> str:
+    minuten = round((ortszeit(tatsaechlich) - ortszeit(geplant)).total_seconds() / 60)
+    return f" (+{minuten} min)" if minuten > 0 else (f" ({minuten} min)" if minuten < 0 else "")
+
+
+@beta_tool
+def abfahrten(haltestelle: Optional[str] = None, linie: Optional[str] = None, anzahl: int = 6) -> str:
+    """Nächste Abfahrten an einer Haltestelle mit Echtzeit (Straßenbahn, Bus, S-Bahn, Zug).
+
+    Args:
+        haltestelle: Name, z. B. "Augustusplatz"; weglassen für die Heimathaltestelle des Nutzers.
+        linie: Nur diese Linie, z. B. "4" oder "S3".
+        anzahl: Anzahl Abfahrten.
+    """
+    name = haltestelle or HEIMATHALTESTELLE
+    if not name:
+        return "Keine Haltestelle genannt und keine Heimathaltestelle eingestellt. Frag nach der Haltestelle."
+    ort = ort_finden(name, nur_haltestellen=True)
+    if not ort:
+        return f"Haltestelle '{name}' nicht gefunden."
+    daten = transitous("v5/stoptimes", stopId=ort["id"], n=max(1, min(anzahl, 10)) * (4 if linie else 1))
+    zeilen = []
+    for halt in daten.get("stopTimes", []):
+        if linie and str(halt.get("routeShortName", "")).lower() != linie.lower():
+            continue
+        p = halt["place"]
+        zeit = ortszeit(p.get("departure") or p["scheduledDeparture"])
+        verzug = verspaetung(p["scheduledDeparture"], p["departure"]) if halt.get("realTime") else " (Plan)"
+        zeilen.append(f"{halt['mode'].capitalize()} {halt.get('routeShortName', '')} → {halt.get('headsign', '')}: "
+                      f"{zeit:%H:%M}{verzug}")
+        if len(zeilen) >= anzahl:
+            break
+    kopf = f"Abfahrten {ort['name']}:"
+    return "\n".join([kopf, *zeilen]) if zeilen else f"Keine passenden Abfahrten an {ort['name']} gefunden."
+
+
+def _abschnitt(leg: dict) -> str:
+    start, ende = ortszeit(leg["startTime"]), ortszeit(leg["endTime"])
+    if leg["mode"] == "WALK":
+        # Bei Adressen statt Haltestellen heißen Start und Ziel bei Transitous "START" und "END"
+        ziel = {"END": "zum Ziel", "START": "zum Start"}.get(leg["to"]["name"], f"zu {leg['to']['name']}")
+        return f"zu Fuß {round(leg.get('duration', 0) / 60)} min {ziel}"
+    linie = f"{leg['mode'].capitalize()} {leg.get('routeShortName', '')}".strip()
+    return (f"{linie} Richtung {leg.get('headsign', '')} ab {leg['from']['name']} {start:%H:%M}, "
+            f"an {leg['to']['name']} {ende:%H:%M}")
+
+
+@beta_tool
+def verbindung_suchen(ziel: str, start: Optional[str] = None, zeitpunkt: Optional[str] = None,
+                      ankunft: bool = False) -> str:
+    """Sucht Verbindungen mit Bus und Bahn, mit Echtzeit und Fußwegen.
+
+    Args:
+        ziel: Haltestelle oder Adresse, z. B. "Hauptbahnhof" oder "Karl-Liebknecht-Str. 10".
+        start: Startpunkt; weglassen für die Heimathaltestelle des Nutzers.
+        zeitpunkt: Gewünschte Zeit im ISO-Format, z. B. 2026-10-12T08:30; weglassen für jetzt.
+        ankunft: True, wenn zeitpunkt die gewünschte Ankunftszeit ist ("bis 9 Uhr dort sein").
+    """
+    start = start or HEIMATHALTESTELLE
+    if not start:
+        return "Kein Startpunkt genannt und keine Heimathaltestelle eingestellt. Frag nach dem Start."
+    von, nach = ort_finden(start), ort_finden(ziel)
+    if not von or not nach:
+        return f"'{start if not von else ziel}' nicht gefunden."
+    zeit = datetime.fromisoformat(zeitpunkt).astimezone().isoformat() if zeitpunkt else None
+    daten = transitous("v5/plan", fromPlace=ort_parameter(von), toPlace=ort_parameter(nach), time=zeit,
+                       arriveBy="true" if ankunft else None, numItineraries=3)
+    zeilen = []
+    for nummer, fahrt in enumerate(daten.get("itineraries", [])[:3], 1):
+        los, an = ortszeit(fahrt["startTime"]), ortszeit(fahrt["endTime"])
+        zeilen.append(f"{nummer}. los {los:%H:%M}, an {an:%H:%M}, {round(fahrt['duration'] / 60)} min, "
+                      f"{fahrt.get('transfers', 0)} Umstiege: " + "; ".join(_abschnitt(leg) for leg in fahrt["legs"]))
+    kopf = f"Von {von['name']} nach {nach['name']}:"
+    return "\n".join([kopf, *zeilen]) if zeilen else "Keine Verbindung gefunden."
+
+
 # ---------------------------------------------------------------- Kurzbefehle (z. B. Home-Szenen)
 
 def erlaubte_kurzbefehle() -> list:
@@ -1732,6 +1846,7 @@ WERKZEUGE = [erinnerung_anlegen, erinnerungen_lesen, erinnerung_abhaken,
              mails_lesen, mails_suchen, mail_vorlesen, mail_antworten, mail_schreiben,
              lautstaerke, app_oeffnen, app_beenden, dunkelmodus, bildschirm_sperren,
              apple_music_abspielen, apple_music_steuern, youtube_abspielen, youtube_steuern,
+             abfahrten, verbindung_suchen,
              notiz_anlegen, notizen_suchen, nachricht_senden, kurzbefehle_auflisten, kurzbefehl_ausfuehren]
 
 

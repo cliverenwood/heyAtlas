@@ -71,6 +71,10 @@ TEXTFELDER = {
                                          "weiter zuhört (0 schaltet das ab)."),
     "Kurzbefehl-Ordner …": ("KURZBEFEHL_ORDNER", "Ordner in der Kurzbefehle-App, dessen Kurzbefehle Atlas "
                                                  "ausführen darf."),
+    "Heimathaltestelle …": ("HEIMATHALTESTELLE", "Haltestelle für „Wann fährt meine Bahn?“, "
+                                                 "z. B. Leipzig, Breite Str."),
+    "Fahrplan-Kontakt …": ("FAHRPLAN_KONTAKT", "Kontaktangabe, die Atlas bei Fahrplanabfragen an Transitous "
+                                               "mitschickt (E-Mail oder Website). Transitous verlangt das."),
 }
 SCHLUESSEL = {
     # Menütitel: (Schlüsselbund-Dienst, Erklärung)
@@ -117,6 +121,9 @@ class AtlasApp(rumps.App):
             self.status, self.pause, None,
             self.einstellungsmenue(), None,
             rumps.MenuItem("Logdatei öffnen", callback=lambda _: subprocess.run(["/usr/bin/open", LOGDATEI])),
+            # Von Transitous verlangte sichtbare Quellenangabe für die Fahrplandaten
+            rumps.MenuItem("Fahrplandaten: Transitous",
+                           callback=lambda _: subprocess.run(["/usr/bin/open", "https://transitous.org/sources/"])),
             rumps.MenuItem("heyAtlas beenden", callback=lambda _: rumps.quit_application()),
         ]
         self.autostart.state = self.autostart_aktiv()
