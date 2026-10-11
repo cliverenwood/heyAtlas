@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>heyAtlas</string>
+    <key>CFBundleDisplayName</key>
+    <string>heyAtlas</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.cliverenwood.heyatlas</string>
+    <key>CFBundleExecutable</key>
+    <string>heyAtlas</string>
+    <key>CFBundleIconFile</key>
+    <string>HeyAtlas</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>VERSION</string>
+    <key>CFBundleVersion</key>
+    <string>BUILD</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>de</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <!-- Nur in der Menüleiste, kein Dock-Symbol -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Begründungen für die Berechtigungsdialoge; ohne sie verweigert macOS den Zugriff stillschweigend -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Atlas hört nach dem Aktivierungswort und nimmt deine Frage auf. Bis zum Aktivierungswort bleibt alles auf dem Mac.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Atlas liest, verschiebt und löscht Termine, wenn du ihn darum bittest.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Atlas liest, verschiebt und löscht Termine, wenn du ihn darum bittest.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Atlas liest deine Erinnerungen und hakt sie auf Zuruf ab.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Atlas liest deine Erinnerungen und hakt sie auf Zuruf ab.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Atlas sucht Empfänger für Nachrichten und Mails in deinen Kontakten.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Atlas steuert Kalender, Erinnerungen, Notizen, Mail, Nachrichten, Musik, Spotify und den Browser für dich.</string>
+</dict>
+</plist>

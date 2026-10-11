@@ -7,7 +7,9 @@ Persönlicher Sprachassistent für macOS (Apple Silicon) mit Claude. Läuft loka
 ## Einrichten
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+brew install python@3.12
+/opt/homebrew/opt/python@3.12/bin/python3.12 -m venv .venv312
+.venv312/bin/pip install -r requirements.txt rumps pyobjc-framework-ServiceManagement
 security add-generic-password -s anthropic-api-key -a "$USER" -w   # fragt den Schlüssel verdeckt ab
 ```
 
@@ -16,15 +18,15 @@ Der Assistent liest den Schlüssel aus dem macOS-Schlüsselbund. Ist `ANTHROPIC_
 ## Starten
 
 ```sh
-.venv/bin/python assistent.py --text   # erst tippen: testet Claude und die Werkzeuge
-.venv/bin/python assistent.py          # Wake-Word: „Hey Jarvis“, Ton abwarten, sprechen
-.venv/bin/python assistent.py --ptt    # Push-to-Talk: Enter startet und beendet die Aufnahme
+.venv312/bin/python assistent.py --text   # erst tippen: testet Claude und die Werkzeuge
+.venv312/bin/python assistent.py          # Wake-Word: „Hey Jarvis“, Ton abwarten, sprechen
+.venv312/bin/python assistent.py --ptt    # Push-to-Talk: Enter startet und beendet die Aufnahme
 ```
 
 Beim ersten Start fragt macOS nach Zugriff auf Mikrofon, Kalender und Erinnerungen (für das Terminal). Das Whisper-Modell (~500 MB) wird beim ersten Start geladen. Die Piper-Stimme lädst du einmalig mit:
 
 ```sh
-mkdir -p stimmen && cd stimmen && ../.venv/bin/python -m piper.download_voices de_DE-thorsten-medium
+mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voices de_DE-thorsten-medium
 ```
 
 ## Einstellungen (Umgebungsvariablen)
@@ -32,7 +34,7 @@ mkdir -p stimmen && cd stimmen && ../.venv/bin/python -m piper.download_voices d
 | Variable | Standard | Zweck |
 |---|---|---|
 | `CLAUDE_MODELL` | `claude-sonnet-5` | `claude-opus-5` ist gründlicher, aber etwa doppelt so langsam |
-| `STIMME` | `stimmen/de_DE-thorsten-medium.onnx` | Piper-Stimme; weitere laden mit `cd stimmen && ../.venv/bin/python -m piper.download_voices de_DE-kerstin-low` |
+| `STIMME` | `stimmen/de_DE-thorsten-medium.onnx` | Piper-Stimme; weitere laden mit `cd stimmen && ../.venv312/bin/python -m piper.download_voices de_DE-kerstin-low` |
 | `KALENDER` | erster beschreibbarer | Kalender für neue Termine |
 | `BROWSER` | `Safari` | Browser für YouTube, alternativ `Google Chrome` |
 | `HEIMATORT` | leer | Ort für Wetterfragen ohne Ortsangabe, z. B. `Hamburg` |
@@ -85,14 +87,14 @@ Training mit dem Colab-Notizbuch aus dem README von [openWakeWord](https://githu
 Mit der eigenen Stimme testen:
 
 ```sh
-.venv/bin/python assistent.py --wakeword-test
+.venv312/bin/python assistent.py --wakeword-test
 ```
 
 ## Mac vor Weckern aufwecken (pmset)
 
 ```sh
-.venv/bin/python assistent.py --pmset-einrichten   # fragt einmal nach dem Admin-Passwort
-.venv/bin/python assistent.py --pmset-entfernen
+.venv312/bin/python assistent.py --pmset-einrichten   # fragt einmal nach dem Admin-Passwort
+.venv312/bin/python assistent.py --pmset-entfernen
 ```
 
 Legt `/etc/sudoers.d/heyatlas` an, das nur `pmset schedule wake …` und `pmset schedule cancel wake …` ohne Passwort erlaubt.
@@ -127,3 +129,19 @@ Die Sätze stehen in `SCHNELL_TEXTE` in `assistent.py` und lassen sich dort erg�
 ```sh
 uvx ruff check .       # Konfiguration in ruff.toml, Ziel Python 3.9
 ```
+
+## App und DMG
+
+```sh
+packaging/build.sh          # baut build/heyAtlas.app und build/heyAtlas-<Version>.dmg
+.venv312/bin/python app.py  # Menüleisten-App ohne Bauen ausprobieren
+```
+
+- Menüleisten-App (`app.py`) mit Status, Pause und Einstellungen; die Einstellungen landen in
+  `~/Library/Application Support/heyAtlas/einstellungen.json`, Schlüssel im Schlüsselbund, Ausgaben in
+  `~/Library/Logs/heyAtlas.log`.
+- Die App enthält ihre Python-Pakete, nutzt aber das Homebrew-Python dieses Macs (`/opt/homebrew/opt/python@3.12`).
+  Sie läuft deshalb nur auf Macs mit diesem Python.
+- Lokal signiert, ohne Apple-Entwicklerkonto: beim ersten Öffnen Rechtsklick → Öffnen. Nach einem Neubau kann
+  macOS die Berechtigungen erneut abfragen.
+- Whisper-Modell und Stimme lädt die App beim ersten Start herunter.

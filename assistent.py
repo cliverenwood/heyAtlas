@@ -9,6 +9,7 @@ Start:  python3 assistent.py          (Wake-Word, Aufnahme endet bei einer Sprec
 """
 
 import base64
+import getpass
 import json
 import os
 import re
@@ -27,26 +28,53 @@ from anthropic import beta_tool
 ORDNER = os.path.dirname(os.path.abspath(__file__))
 DATENORDNER = os.path.expanduser("~/Library/Application Support/heyAtlas")
 
-MODELL = os.environ.get("CLAUDE_MODELL", "claude-sonnet-5")  # gemessen etwa doppelt so schnell wie claude-opus-5
-# Piper-Stimme; weitere mit: .venv/bin/python -m piper.download_voices <name> (im Ordner stimmen/)
-STIMME = os.environ.get("STIMME", os.path.join(ORDNER, "stimmen", "de_DE-thorsten-medium.onnx"))
-KALENDER = os.environ.get("KALENDER", "")  # leer = erster beschreibbarer Kalender
-HEIMATORT = os.environ.get("HEIMATORT", "")  # Ort für Wetterfragen ohne Ortsangabe
-BROWSER = os.environ.get("BROWSER", "Safari")  # für YouTube: "Safari" oder "Google Chrome"
-WHISPER_MODELL = os.environ.get("WHISPER_MODELL", "mlx-community/whisper-small-mlx")
+EINSTELLUNGEN_DATEI = os.path.join(DATENORDNER, "einstellungen.json")
+
+
+def einstellungen_laden() -> dict:
+    try:
+        with open(EINSTELLUNGEN_DATEI) as datei:
+            return json.load(datei)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def einstellungen_speichern(werte: dict) -> None:
+    os.makedirs(DATENORDNER, exist_ok=True)
+    with open(EINSTELLUNGEN_DATEI + ".neu", "w") as datei:
+        json.dump(werte, datei, indent=2, ensure_ascii=False)
+    os.replace(EINSTELLUNGEN_DATEI + ".neu", EINSTELLUNGEN_DATEI)
+
+
+_EINSTELLUNGEN = einstellungen_laden()
+
+
+def einstellung(name: str, standard: str) -> str:
+    """Umgebungsvariable vor Einstellungsdatei (von der Menüleisten-App geschrieben) vor Standardwert."""
+    return os.environ.get(name) or str(_EINSTELLUNGEN.get(name, standard))
+
+
+MODELL = einstellung("CLAUDE_MODELL", "claude-sonnet-5")  # gemessen etwa doppelt so schnell wie claude-opus-5
+# Piper-Stimme: Name wie "de_DE-thorsten-medium" oder Pfad zu einer .onnx-Datei
+STIMME = einstellung("STIMME", "de_DE-thorsten-medium")
+STIMMEN_ORDNER = os.path.join(DATENORDNER, "stimmen")
+KALENDER = einstellung("KALENDER", "")  # leer = erster beschreibbarer Kalender
+HEIMATORT = einstellung("HEIMATORT", "")  # Ort für Wetterfragen ohne Ortsangabe
+BROWSER = einstellung("BROWSER", "Safari")  # für YouTube: "Safari" oder "Google Chrome"
+WHISPER_MODELL = einstellung("WHISPER_MODELL", "mlx-community/whisper-small-mlx")
 ABTASTRATE = 16000
 
 # Pfad zu einer .onnx-Datei oder ein mitgeliefertes openWakeWord-Modell (hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
 # Standard bleibt "Hey Jarvis": Das erste selbst trainierte "Hey Atlas" erkannte die echte Stimme des
 # Nutzers kaum (Höchstwert 0,10 bei Schwelle 0,5). Auswählbar ist es trotzdem, z. B. WAKEWORD=<HEY_ATLAS>.
 HEY_ATLAS = os.path.join(ORDNER, "assets", "wakeword", "hey_atlas.onnx")
-WAKEWORD = os.environ.get("WAKEWORD", "hey_jarvis")
-WAKEWORD_SCHWELLE = float(os.environ.get("WAKEWORD_SCHWELLE", "0.5"))
+WAKEWORD = einstellung("WAKEWORD", "hey_jarvis")
+WAKEWORD_SCHWELLE = float(einstellung("WAKEWORD_SCHWELLE", "0.5"))
 BLOCK = 1280  # 80 ms bei 16 kHz, die Blockgröße, die openWakeWord erwartet
 # So lange hört der Assistent nach einer Antwort ohne Wake-Word weiter zu; 0 schaltet Folgefragen ab
-NACHFRAGE_SEK = float(os.environ.get("NACHFRAGE_SEK", "4"))
+NACHFRAGE_SEK = float(einstellung("NACHFRAGE_SEK", "4"))
 # Nur Kurzbefehle aus diesem Ordner der Kurzbefehle-App darf der Assistent ausführen
-KURZBEFEHL_ORDNER = os.environ.get("KURZBEFEHL_ORDNER", "Sprachassistent")
+KURZBEFEHL_ORDNER = einstellung("KURZBEFEHL_ORDNER", "Sprachassistent")
 
 MODUS = "text" if "--text" in sys.argv else "ptt" if "--ptt" in sys.argv else "wake"
 TEXTMODUS = MODUS == "text"
@@ -72,39 +100,100 @@ SCHLUESSELBUND_DIENST = "anthropic-api-key"
 def schluesselbund(dienst: str) -> Optional[str]:
     """Liest ein Geheimnis aus dem macOS-Schlüsselbund, None wenn es fehlt."""
     ergebnis = subprocess.run(
-        ["/usr/bin/security", "find-generic-password", "-s", dienst, "-a", os.environ.get("USER", ""), "-w"],
+        ["/usr/bin/security", "find-generic-password", "-s", dienst, "-a", getpass.getuser(), "-w"],
         capture_output=True, text=True)
     return ergebnis.stdout.strip() if ergebnis.returncode == 0 else None
 
 
+def schluesselbund_speichern(dienst: str, geheimnis: str) -> None:
+    """Speichert oder ersetzt ein Geheimnis im Schlüsselbund. Das Geheimnis geht über stdin an
+    "security -i" statt als Argument, damit es nicht in der Prozessliste auftaucht."""
+    if not geheimnis.isascii():
+        # "security find-generic-password -w" gibt Nicht-ASCII als Hex zurück; API-Schlüssel sind reines ASCII
+        raise ValueError("Der Schlüssel enthält Umlaute oder Sonderzeichen. Bitte genau so einfügen, wie er "
+                         "beim Anbieter angezeigt wird.")
+
+    def zitiert(text: str) -> str:
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    befehl = (f"add-generic-password -U -s {zitiert(dienst)} -a {zitiert(getpass.getuser())} "
+              f"-w {zitiert(geheimnis)}\n")
+    ergebnis = subprocess.run(["/usr/bin/security", "-i"], input=befehl, capture_output=True, text=True)
+    if ergebnis.returncode != 0 or "error" in ergebnis.stderr.lower():
+        raise RuntimeError(f"Schlüsselbund hat abgelehnt: {ergebnis.stderr.strip()}")
+
+
 def api_schluessel() -> Optional[str]:
     """Nimmt ANTHROPIC_API_KEY aus der Umgebung, sonst aus dem macOS-Schlüsselbund."""
-    schluessel = os.environ.get("ANTHROPIC_API_KEY") or schluesselbund(SCHLUESSELBUND_DIENST)
-    if not schluessel:
-        sys.exit("Kein API-Schlüssel gefunden. Einmalig speichern mit:\n"
-                 f"  security add-generic-password -s {SCHLUESSELBUND_DIENST} -a \"$USER\" -w")
-    return schluessel
+    return os.environ.get("ANTHROPIC_API_KEY") or schluesselbund(SCHLUESSELBUND_DIENST)
 
 
 # Nur nötig, wenn der API-Schlüssel keinem Workspace zugeordnet ist
 WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 
-client = anthropic.Anthropic(
-    api_key=api_schluessel(),
-    default_headers={"anthropic-workspace-id": WORKSPACE_ID} if WORKSPACE_ID else None,
-)
+_client = None
+
+
+def claude() -> anthropic.Anthropic:
+    """Claude-Client, erst beim ersten Gebrauch erzeugt. So startet die App auch ohne Schlüssel
+    und kann danach fragen."""
+    global _client
+    if _client is None:
+        schluessel = api_schluessel()
+        if not schluessel:
+            raise RuntimeError("Kein Anthropic-API-Schlüssel. In der Menüleiste unter Einstellungen eintragen oder:\n"
+                               f"  security add-generic-password -s {SCHLUESSELBUND_DIENST} -a \"$USER\" -w")
+        _client = anthropic.Anthropic(
+            api_key=schluessel,
+            default_headers={"anthropic-workspace-id": WORKSPACE_ID} if WORKSPACE_ID else None,
+        )
+    return _client
 
 
 # ---------------------------------------------------------------- Ein- und Ausgabe
 
+# ---------------------------------------------------------------- Status für die Menüleisten-App
+
+STATUS = {"text": "Startet …", "hoert": False}  # liest die App regelmäßig aus
+PAUSIERT = threading.Event()  # gesetzt: Mikrofon zu, kein Wake-Word
+
+
+def melde_status(text: str, hoert: bool = False) -> None:
+    STATUS.update(text=text, hoert=hoert)
+
+
+# ---------------------------------------------------------------- Stimmen
+
 _stimme = None
 
 
-def lade_stimme():
+def stimmen_pfad(name: str) -> str:
+    """Pfad zur Piper-Stimme; lädt sie beim ersten Mal herunter (20 bis 120 MB)."""
+    if name.endswith(".onnx"):
+        return name
+    for ordner in (STIMMEN_ORDNER, os.path.join(ORDNER, "stimmen")):
+        pfad = os.path.join(ordner, name + ".onnx")
+        if os.path.exists(pfad):
+            return pfad
+    from pathlib import Path
+
+    from piper.download_voices import download_voice
+
+    melde_status(f"Lade Stimme {name} …")
+    os.makedirs(STIMMEN_ORDNER, exist_ok=True)
+    download_voice(name, Path(STIMMEN_ORDNER))
+    return os.path.join(STIMMEN_ORDNER, name + ".onnx")
+
+
+def lade_stimme(name: Optional[str] = None):
+    """Die eingestellte Stimme (gecacht) oder, mit name, eine andere zum Probehören."""
     global _stimme
+    from piper import PiperVoice
+
+    if name:
+        return PiperVoice.load(stimmen_pfad(name))
     if _stimme is None:
-        from piper import PiperVoice
-        _stimme = PiperVoice.load(STIMME)
+        _stimme = PiperVoice.load(stimmen_pfad(STIMME))
     return _stimme
 
 
@@ -148,20 +237,37 @@ def warte_auf_wakeword() -> None:
     """Hört lokal mit, bis das Wake-Word erkannt wird. Bis dahin verlässt kein Audio den Mac."""
     import sounddevice as sd
 
+    modell = lade_wakeword()
+    name = os.path.basename(WAKEWORD).removesuffix(".onnx")
+    while True:
+        while PAUSIERT.is_set():  # pausiert: Mikrofon bleibt zu
+            melde_status("Pausiert")
+            time.sleep(0.3)
+        modell.reset()
+        melde_status(f"Wartet auf „{name}“")
+        print(f"👂 Warte auf „{name}“ …")
+        with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK) as strom:
+            while not PAUSIERT.is_set():
+                block, _ = strom.read(BLOCK)
+                if max(modell.predict(block.flatten()).values()) >= WAKEWORD_SCHWELLE:
+                    return
+
+
+def lade_wakeword():
+    """Lädt das Wake-Word-Modell. Mitgelieferte Modelle liegen schon im Paket; nur wenn eines fehlt, wird es
+    heruntergeladen (in der App ist das Paket dafür nicht vorgesehen, deshalb vorab im Build)."""
     global _wakeword
     if _wakeword is None:
         from openwakeword.model import Model
-        from openwakeword.utils import download_models
-        if not WAKEWORD.endswith(".onnx"):
+
+        try:
+            _wakeword = Model(wakeword_models=[WAKEWORD], inference_framework="onnx")
+        except (ValueError, FileNotFoundError):
+            from openwakeword.utils import download_models
+
             download_models([WAKEWORD])
-        _wakeword = Model(wakeword_models=[WAKEWORD], inference_framework="onnx")
-    _wakeword.reset()
-    print(f"👂 Warte auf „{os.path.basename(WAKEWORD).removesuffix('.onnx')}“ …")
-    with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK) as strom:
-        while True:
-            block, _ = strom.read(BLOCK)
-            if max(_wakeword.predict(block.flatten()).values()) >= WAKEWORD_SCHWELLE:
-                return
+            _wakeword = Model(wakeword_models=[WAKEWORD], inference_framework="onnx")
+    return _wakeword
 
 
 def nimm_auf_bis_stille(stille_sek: float = 0.7, max_warten_sek: float = 5.0, max_sek: float = 20.0):
@@ -170,6 +276,7 @@ def nimm_auf_bis_stille(stille_sek: float = 0.7, max_warten_sek: float = 5.0, ma
     import sounddevice as sd
 
     ton("Tink")
+    melde_status("Hört zu", hoert=True)
     print("🎙  Ich höre …")
     teile, pegel = [], []
     schwelle, gesprochen, still = None, False, 0.0
@@ -203,12 +310,14 @@ def transcribe(audio) -> str:
 
     if len(audio) < ABTASTRATE * 0.3:
         return ""
+    melde_status("Denkt nach …")
     return mlx_whisper.transcribe(audio, path_or_hf_repo=WHISPER_MODELL, language="de")["text"].strip()
 
 
 def lade_whisper() -> None:
     import numpy as np
 
+    melde_status("Lade Spracherkennung (beim ersten Start etwa 500 MB) …")
     print(f"Lade Whisper-Modell '{WHISPER_MODELL}' (beim ersten Mal wird es heruntergeladen) …")
     transcribe(np.zeros(ABTASTRATE, dtype="float32"))  # mlx-whisper hält das Modell danach im Speicher
 
@@ -1573,7 +1682,7 @@ def ask(text: str) -> str:
     # Eine lange Websuche kann mit pause_turn enden; der Python-Runner setzt das nicht selbst fort,
     # deshalb wird das Gespräch mitgeschrieben und der Runner mit dem pausierten Zug neu gestartet
     for _ in range(4):
-        runner = client.beta.messages.tool_runner(
+        runner = claude().beta.messages.tool_runner(
             model=MODELL,
             max_tokens=4000,
             system=SYSTEMPROMPT,
@@ -1669,7 +1778,9 @@ def main() -> None:
         except Exception as fehler:  # Assistent soll bei einzelnen Fehlern weiterlaufen
             folgefrage = False
             print(f"Fehler: {fehler}", file=sys.stderr)
+            melde_status(f"Fehler: {str(fehler)[:60]}")
             sprich("Da ist etwas schiefgegangen.")
+            time.sleep(3)  # bei Dauerfehlern (z. B. kein Mikrofon) nicht im Sekundentakt melden
 
 
 if __name__ == "__main__":
