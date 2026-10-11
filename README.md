@@ -54,7 +54,7 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 - `spotify_steuern`: Play, Pause, weiter, zurück, lauter, leiser, Zufallswiedergabe
 - `spotify_aktueller_titel`: was gerade läuft
 - `notiz_anlegen`, `notizen_suchen`: Notizen-App
-- `nachricht_senden`: iMessage an einen Kontakt, mit Rückfrage vor dem Senden
+- `nachricht_senden`: iMessage an einen Kontakt, mit Rückfrage vor dem Senden (SMS siehe Abschnitt „Nachrichten: iMessage und SMS“)
 - `kurzbefehle_auflisten`, `kurzbefehl_ausfuehren`: Kurzbefehle aus dem Ordner „Sprachassistent“, z. B. Home-Szenen
 - `timer_stellen`, `timer_abfragen`, `timer_abbrechen`: mehrere benannte Timer gleichzeitig
 - `wecker_stellen`, `wecker_auflisten`, `wecker_loeschen`: einmalig oder an Wochentagen, gespeichert in `~/Library/Application Support/heyAtlas/wecker.json`
@@ -154,3 +154,16 @@ Beim ersten Start fragt heyAtlas alle Zugriffe auf einmal ab: Mikrofon, Kalender
 sowie die Steuerung von Kalender, Erinnerungen, Notizen, Mail, Nachrichten, Kontakte, Musik, Spotify, Browser und
 Systemereignisse. Dafür startet es nicht laufende Apps kurz unsichtbar und beendet sie danach wieder. Am Ende zeigt
 es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.
+
+## Nachrichten: iMessage und SMS
+
+> **Wichtig für SMS:** Normale SMS (und RCS-Nachrichten, z. B. von Android-Telefonen) kommen nur dann auf dem Mac an
+> und lassen sich nur dann vom Mac senden, wenn auf dem iPhone die **SMS-Weiterleitung** für diesen Mac eingeschaltet
+> ist: **iPhone → Einstellungen → Apps → Nachrichten → Weiterleitung von Textnachrichten → diesen Mac einschalten.**
+> Ohne diese Einstellung sieht und sendet heyAtlas nur iMessages.
+
+- Für den älteren Verlauf zusätzlich „Nachrichten in iCloud“ auf iPhone und Mac einschalten.
+- Senden: heute nur als iMessage. Geplant: erst iMessage, sonst SMS.
+- Vorlesen (geplant): heyAtlas liest die Nachrichten-Datenbank `~/Library/Messages/chat.db`. Dafür braucht es
+  **Festplattenvollzugriff** (Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff → heyAtlas).
+  Diese Berechtigung erlaubt das Lesen aller Dateien; heyAtlas öffnet nur die Nachrichten-Datenbank.
