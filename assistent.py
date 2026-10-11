@@ -2200,86 +2200,6 @@ def _anruf_fenster() -> list:
     return ergebnis
 
 
-def _ax_punkt_und_groesse(element):
-    """Position und Größe eines Elements in Bildschirmkoordinaten, oder (None, None)."""
-    import ApplicationServices
-
-    werte = []
-    for attribut, typ in ((ApplicationServices.kAXPositionAttribute, ApplicationServices.kAXValueCGPointType),
-                          (ApplicationServices.kAXSizeAttribute, ApplicationServices.kAXValueCGSizeType)):
-        roh = _ax(element, attribut)
-        ok, wert = ApplicationServices.AXValueGetValue(roh, typ, None) if roh is not None else (False, None)
-        werte.append(wert if ok else None)
-    return werte[0], werte[1]
-
-
-def _element_beschreiben(element) -> tuple:
-    import ApplicationServices
-
-    return tuple(str(_ax(element, a) or "") for a in (
-        ApplicationServices.kAXRoleAttribute, ApplicationServices.kAXTitleAttribute,
-        ApplicationServices.kAXDescriptionAttribute, ApplicationServices.kAXIdentifierAttribute))
-
-
-def mitteilung_abtasten(mitteilung) -> list:
-    """Fragt in einem 10-Pixel-Raster, welches Element an jeder Stelle der Mitteilung liegt (wie VoiceOver). So
-    werden auch Inhalte gefunden, die ein anderer Prozess hineinzeichnet. Liefert [(Beschriftung, Element, Aktion)]."""
-    import ApplicationServices
-
-    punkt, groesse = _ax_punkt_und_groesse(mitteilung)
-    if punkt is None or groesse is None:
-        print("Abtasten: Position der Mitteilung unbekannt")
-        return []
-    system = ApplicationServices.AXUIElementCreateSystemWide()
-    gesehen, funde = set(), []
-    for y in range(int(punkt.y) + 5, int(punkt.y + groesse.height) - 2, 10):
-        for x in range(int(punkt.x) + 5, int(punkt.x + groesse.width) - 2, 10):
-            fehler, element = ApplicationServices.AXUIElementCopyElementAtPosition(system, float(x), float(y), None)
-            if fehler or element is None or _element_beschreiben(element) in gesehen:
-                continue
-            gesehen.add(_element_beschreiben(element))
-            knoepfe, texte = [], []
-            _ax_sammeln(element, knoepfe, texte)
-            pid = ApplicationServices.AXUIElementGetPid(element, None)[1]
-            print(f"Abtasten ({x},{y}) pid {pid}: {_element_beschreiben(element)} Knöpfe {[k for k, _, _ in knoepfe]}"
-                  f" Texte {texte[:4]}")
-            funde += knoepfe
-    return funde
-
-
-ANRUF_PROZESS_MUSTER = re.compile(r"call|facetime|notification|telephony|conversation", re.I)
-
-
-def anrufprozesse_durchsuchen() -> list:
-    """Durchsucht die Fenster aller Prozesse, deren Name nach Anrufen oder Mitteilungen klingt."""
-    import ApplicationServices
-
-    liste = subprocess.run(["/bin/ps", "-axo", "pid=,comm="], capture_output=True, text=True).stdout
-    funde = []
-    for zeile in liste.splitlines():
-        pid, _, befehl = zeile.strip().partition(" ")
-        name = befehl.rsplit("/", 1)[-1]
-        if not ANRUF_PROZESS_MUSTER.search(name):
-            continue
-        programm = ApplicationServices.AXUIElementCreateApplication(int(pid))
-        for fenster in _ax(programm, ApplicationServices.kAXWindowsAttribute) or []:
-            knoepfe, texte = [], []
-            _ax_sammeln(fenster, knoepfe, texte)
-            if knoepfe or texte:
-                print(f"Prozess {name} ({pid}): Knöpfe {[k for k, _, _ in knoepfe]} Texte {texte[:4]}")
-            funde += knoepfe
-    return funde
-
-
-def anruf_umfassend_suchen() -> list:
-    """Alle bekannten Wege zusammen: Abtasten jeder Anruf-Mitteilung, dann die Anruf-Prozesse."""
-    funde = []
-    for _, _, _, mitteilungen in _anruf_fenster():
-        for mitteilung in mitteilungen:
-            funde += mitteilung_abtasten(mitteilung)
-    return funde + anrufprozesse_durchsuchen()
-
-
 def _knopf_suchen_und_druecken(beschriftungen: tuple) -> str:
     import ApplicationServices
 
@@ -2300,12 +2220,6 @@ def anruf_knopf_druecken(beschriftungen: tuple) -> str:
     gedrueckt = _knopf_suchen_und_druecken(beschriftungen)
     if gedrueckt:
         return gedrueckt
-    for beschriftung, element, aktion in anruf_umfassend_suchen():
-        if beschriftung in beschriftungen:  # nur ausdrücklich passend benannte Elemente, nie raten
-            fehler = ApplicationServices.AXUIElementPerformAction(element, aktion)
-            print(f"Anruf: drücke {beschriftung!r} aus der umfassenden Suche ({aktion.splitlines()[0]}), "
-                  f"Ergebnis {fehler}")
-            return beschriftung
     for _, _, _, mitteilungen in _anruf_fenster():
         for mitteilung in mitteilungen:
             fehler, aktionen = ApplicationServices.AXUIElementCopyActionNames(mitteilung, None)
@@ -2389,11 +2303,7 @@ def fenster_aufbau_protokollieren() -> None:
 
 
 def _klingeln_beginnt(fenster: list) -> None:
-    """Erstes Klingeln: einmal umfassend suchen (nur fürs Log), dann den Anrufer ansagen."""
-    try:
-        anruf_umfassend_suchen()
-    except Exception as fehler:  # Diagnose darf die Ansage nicht verhindern
-        print(f"Anruf-Diagnose: {fehler}", file=sys.stderr)
+    """Erstes Klingeln: den Anrufer ansagen."""
     texte = next(ts for _, ks, ts in fenster if set(ks) & (set(ANNEHMEN) | {ANRUF_KENNUNG}))
     ANRUF["anrufer"] = anrufer_aus(texte) if texte else ""
     ansage = f"Anruf von {ANRUF['anrufer']}" if ANRUF["anrufer"] not in ("", "unbekannt") else "Eingehender Anruf"
@@ -2452,7 +2362,7 @@ def anruf_annehmen() -> Optional[str]:
     if not ANRUF["klingelt"]:
         return None
     if not anruf_knopf_druecken(ANNEHMEN):
-        return "Ich finde den Knopf zum Annehmen nicht."
+        return "Per Sprache kann ich den Anruf leider nicht annehmen. Klick bitte auf Annehmen."
     ANRUF.update(klingelt=False, pausiert_seit=time.time(), auflegen_gesehen=False)
     PAUSIERT.set()  # während des Gesprächs nicht auf das Aktivierungswort hören
     wiedergabe_pausiert()  # angehaltene Musik nach dem Annehmen nicht wieder starten
@@ -2463,7 +2373,9 @@ def anruf_ablehnen() -> Optional[str]:
     if not ANRUF["klingelt"]:
         return None
     ANRUF["klingelt"] = False
-    return "Abgelehnt." if anruf_knopf_druecken(ABLEHNEN) else "Ich finde den Knopf zum Ablehnen nicht."
+    if anruf_knopf_druecken(ABLEHNEN):
+        return "Abgelehnt."
+    return "Per Sprache kann ich den Anruf leider nicht ablehnen. Klick bitte auf Ablehnen."
 
 
 def bedienungshilfen_erlaubt(nachfragen: bool = False) -> bool:
