@@ -243,6 +243,14 @@ def sprich(text: str) -> None:
 
 _ausgabe_sperre = threading.Lock()
 
+# Startet ein Werkzeug Musik oder ein Video, hört Atlas danach nicht ohne Aktivierungswort weiter;
+# sonst hält er den Ton der Wiedergabe für eine Folgefrage
+_wiedergabe_gestartet = threading.Event()
+
+
+def wiedergabe_gestartet() -> None:
+    _wiedergabe_gestartet.set()
+
 
 def ton(name: str) -> None:
     subprocess.run(["/usr/bin/afplay", f"/System/Library/Sounds/{name}.aiff"])
@@ -708,6 +716,7 @@ def spotify_abspielen(suche: str, art: Literal["track", "artist", "album"] = "tr
         return f"Nichts gefunden für '{suche}'."
     t = treffer[0]
     osascript('on run argv\ntell application "Spotify" to play track (item 1 of argv)\nend run', t["uri"])
+    wiedergabe_gestartet()
     von = f" von {', '.join(k['name'] for k in t['artists'])}" if "artists" in t else ""
     return f"Spiele {t['name']}{von}."
 
@@ -728,6 +737,8 @@ def spotify_steuern(aktion: Literal["play", "pause", "weiter", "zurueck", "laute
         aktion: play, pause, weiter (nächster Titel), zurueck (vorheriger Titel), lauter, leiser, zufall_an, zufall_aus.
     """
     osascript(f'tell application "Spotify" to {SPOTIFY_BEFEHLE[aktion]}')
+    if aktion in ("play", "weiter", "zurueck"):
+        wiedergabe_gestartet()
     return f"Erledigt: {aktion}."
 
 
@@ -1457,6 +1468,8 @@ def apple_music_abspielen(suche: str) -> str:
         return (name of item 1 of treffer) & " von " & (artist of item 1 of treffer)
     end tell
 end run""", suche)
+    if ergebnis:
+        wiedergabe_gestartet()
     return f"Spiele {ergebnis}." if ergebnis else f"Nichts in der Mediathek gefunden für '{suche}'."
 
 
@@ -1474,6 +1487,8 @@ def apple_music_steuern(aktion: Literal["play", "pause", "weiter", "zurueck", "l
         aktion: play, pause, weiter, zurueck, lauter, leiser.
     """
     osascript(f'tell application "Music" to {MUSIC_BEFEHLE[aktion]}')
+    if aktion in ("play", "weiter", "zurueck"):
+        wiedergabe_gestartet()
     return f"Erledigt: {aktion}."
 
 
@@ -1498,6 +1513,7 @@ def youtube_abspielen(suche: str) -> str:
     video = treffer[0]
     adresse = f"https://www.youtube.com/watch?v={video['id']['videoId']}"
     subprocess.run(["/usr/bin/open", "-a", BROWSER, adresse], check=True)
+    wiedergabe_gestartet()
     s = video["snippet"]
     return f"Öffne '{s['title']}' vom Kanal {s['channelTitle']}."
 
@@ -1550,6 +1566,8 @@ end run"""
                                "Erweitert → Funktionen für Webentwickler zeigen, dann Menü Entwickler → "
                                "JavaScript von Apple Events erlauben.") from fehler
         raise
+    if ergebnis == "ok" and aktion in ("play", "vor", "zurueck"):
+        wiedergabe_gestartet()
     return {"ok": f"Erledigt: {aktion}.", "kein Tab": "Es ist kein YouTube-Video offen.",
             "kein Video": "Auf der Seite läuft kein Video."}.get(ergebnis, ergebnis)
 
@@ -1704,6 +1722,8 @@ def player_befehl(aktion: str) -> Optional[str]:
         return None
     befehle = SPOTIFY_BEFEHLE if player == "Spotify" else MUSIC_BEFEHLE
     osascript(f'tell application "{player}" to {befehle[aktion]}')
+    if aktion in ("play", "weiter", "zurueck"):
+        wiedergabe_gestartet()
     return "Okay."
 
 
@@ -1856,8 +1876,17 @@ def eine_runde(folgefrage: bool) -> bool:
     text = hoere(direkt=True, max_warten_sek=NACHFRAGE_SEK) if folgefrage else hoere()
     if not text:
         return False
+    _wiedergabe_gestartet.clear()
     sprich(schnellbefehl(text) or ask(text))
-    return MODUS == "wake" and NACHFRAGE_SEK > 0
+    return MODUS == "wake" and NACHFRAGE_SEK > 0 and not _wiedergabe_gestartet.is_set() and not musik_laeuft()
+
+
+def musik_laeuft() -> bool:
+    """Spielt Spotify oder Musik gerade? Dann kein Nachhören, sonst landet die Musik in der Aufnahme."""
+    try:
+        return aktiver_player(nur_spielend=True) is not None
+    except RuntimeError:
+        return False
 
 
 def main() -> None:
