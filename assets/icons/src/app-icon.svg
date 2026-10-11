@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+ <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+  <stop offset="0" stop-color="#5A5FEA"/><stop offset="0.55" stop-color="#2A2E96"/><stop offset="1" stop-color="#121641"/></linearGradient>
+ <radialGradient id="hl" cx="0.3" cy="0.12" r="0.75">
+  <stop offset="0" stop-color="#fff" stop-opacity="0.22"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+ <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#C9CEFF"/></linearGradient>
+ <radialGradient id="glow"><stop offset="0" stop-color="#FFB84D" stop-opacity="0.55"/><stop offset="1" stop-color="#FFB84D" stop-opacity="0"/></radialGradient>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#hl)"/>
+<path d="M743.44 372.94 A270 270 0 1 1 651.06 280.56" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" opacity="0.96"/>
+<circle cx="702.9" cy="321.1" r="78" fill="url(#glow)"/>
+<circle cx="702.9" cy="321.1" r="34" fill="#FFB84D"/>
+<rect x="298" y="447.0" width="60" height="130" rx="30" fill="url(#bar)"/><rect x="390" y="387.0" width="60" height="250" rx="30" fill="url(#bar)"/><rect x="482" y="322.0" width="60" height="380" rx="30" fill="url(#bar)"/><rect x="574" y="387.0" width="60" height="250" rx="30" fill="url(#bar)"/><rect x="666" y="447.0" width="60" height="130" rx="30" fill="url(#bar)"/>
+</svg>

@@ -12,3 +12,4 @@ stimmen/*.onnx.json
 build/
 dist/
 *.dmg
+*.zip

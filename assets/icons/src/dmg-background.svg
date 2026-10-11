@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F6F6FF"/><stop offset="1" stop-color="#DCDFFF"/></linearGradient>
+ <radialGradient id="g1" cx="0.12" cy="0.05" r="0.7"><stop offset="0" stop-color="#8E93FF" stop-opacity="0.35"/><stop offset="1" stop-color="#8E93FF" stop-opacity="0"/></radialGradient>
+</defs>
+<rect width="660" height="400" fill="url(#bg)"/><rect width="660" height="400" fill="url(#g1)"/>
+<g font-family="Inter, Helvetica, Arial, sans-serif" text-anchor="middle">
+ <text x="330" y="62" font-size="30" font-weight="700" fill="#161A52" letter-spacing="-0.5">Hey Atlas</text>
+ <text x="330" y="86" font-size="14" fill="#5A60C8">Dein Sprachassistent</text>
+ <text x="330" y="352" font-size="14" fill="#3E4490">Zum Installieren das Symbol auf „Programme“ ziehen</text>
+</g>
+<path d="M262 200 H390" stroke="#4B50D8" stroke-width="4" stroke-linecap="round" stroke-dasharray="2 10" fill="none"/>
+<path d="M380 186 L398 200 L380 214" stroke="#4B50D8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
