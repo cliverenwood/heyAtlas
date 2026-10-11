@@ -3,6 +3,8 @@
 Start:  python3 assistent.py          (Wake-Word, Aufnahme endet bei einer Sprechpause)
         python3 assistent.py --ptt    (Push-to-Talk: Enter startet und beendet die Aufnahme)
         python3 assistent.py --text   (Tippen statt Sprechen, zum Testen der Tools)
+        python3 assistent.py --pmset-einrichten / --pmset-entfernen
+                                      (Mac vor Weckern aus dem Ruhezustand wecken; fragt einmal nach dem Admin-Passwort)
 """
 
 import base64
@@ -10,16 +12,18 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import anthropic
 from anthropic import beta_tool
 
 ORDNER = os.path.dirname(os.path.abspath(__file__))
+DATENORDNER = os.path.expanduser("~/Library/Application Support/heyAtlas")
 
 MODELL = os.environ.get("CLAUDE_MODELL", "claude-sonnet-5")  # gemessen etwa doppelt so schnell wie claude-opus-5
 # Piper-Stimme; weitere mit: .venv/bin/python -m piper.download_voices <name> (im Ordner stimmen/)
@@ -47,7 +51,7 @@ Nutze die Werkzeuge für Erinnerungen und Kalender. Wenn Datum oder Uhrzeit unkl
 statt zu raten. Um einen Termin zu verschieben oder zu löschen, lies ihn zuerst mit termine_lesen und nutze
 dessen Kennung wie T1. Für Musik nutze die Spotify-Werkzeuge, fürs Wetter das Wetter-Werkzeug; nenne Temperaturen
 gerundet und ohne Nachkommastellen. Für Licht, Heizung und andere Abläufe nutze die Kurzbefehle; schau mit
-kurzbefehle_auflisten nach, welche es gibt. Sprich Uhrzeiten natürlich aus, etwa "um halb drei" oder "um 14 Uhr"."""
+kurzbefehle_auflisten nach, welche es gibt. Für Timer und Wecker nutze die Timer- und Wecker-Werkzeuge. Sprich Uhrzeiten natürlich aus, etwa "um halb drei" oder "um 14 Uhr"."""
 
 SCHLUESSELBUND_DIENST = "anthropic-api-key"
 
@@ -98,9 +102,13 @@ def sprich(text: str) -> None:
     print(f"🔊 {text}")
     if TEXTMODUS:
         return
-    for teil in lade_stimme().synthesize(text):
-        sd.play(teil.audio_float_array, teil.sample_rate)
-        sd.wait()
+    with _ausgabe_sperre:  # Timer und Wecker sprechen aus einem eigenen Thread
+        for teil in lade_stimme().synthesize(text):
+            sd.play(teil.audio_float_array, teil.sample_rate)
+            sd.wait()
+
+
+_ausgabe_sperre = threading.Lock()
 
 
 def ton(name: str) -> None:
@@ -201,6 +209,10 @@ def hoere(direkt: bool = False, max_warten_sek: float = 5.0) -> str:
     else:
         if not direkt:
             warte_auf_wakeword()
+            # Klingelt gerade ein Wecker oder Timer, reicht "Hey Atlas" zum Ausschalten, ohne Umweg über Claude
+            if klingeln_beenden():
+                sprich("Okay, ist aus.")
+                return ""
         audio = nimm_auf_bis_stille(max_warten_sek=max_warten_sek)
     text = transcribe(audio)
     print(f"📝 {text}")
@@ -540,6 +552,282 @@ def wetter(ort: Optional[str] = None, tage: int = 3) -> str:
     return "\n".join(zeilen)
 
 
+# ---------------------------------------------------------------- Timer und Wecker
+
+WOCHENTAGE = ["mo", "di", "mi", "do", "fr", "sa", "so"]
+WECKER_DATEI = os.path.join(DATENORDNER, "wecker.json")
+SUDOERS_DATEI = "/etc/sudoers.d/heyatlas"
+PMSET_BESITZER = "heyAtlas"
+VERPASST_TOLERANZ = timedelta(minutes=30)  # nach Ruhezustand verpasste Wecker klingeln nur, wenn so frisch
+
+_uhr_sperre = threading.Lock()
+_timer: dict = {}    # Name -> Ende (datetime)
+_wecker: list = []   # [{"id", "name", "zeit", "tage", "wake"}], gespeichert in WECKER_DATEI
+_klingeln: dict = {} # Beschreibung -> threading.Event zum Stoppen
+
+
+def wecker_laden() -> None:
+    global _wecker
+    try:
+        with open(WECKER_DATEI) as datei:
+            _wecker = json.load(datei)
+    except FileNotFoundError:
+        _wecker = []
+
+
+def wecker_speichern() -> None:
+    os.makedirs(DATENORDNER, exist_ok=True)
+    with open(WECKER_DATEI + ".neu", "w") as datei:
+        json.dump(_wecker, datei, indent=2, ensure_ascii=False)
+    os.replace(WECKER_DATEI + ".neu", WECKER_DATEI)
+
+
+def naechstes_vorkommen(zeit: datetime, tage: list) -> datetime:
+    """Erster Zeitpunkt ab jetzt mit gleicher Uhrzeit an einem der Wochentage."""
+    while zeit <= datetime.now() or WOCHENTAGE[zeit.weekday()] not in tage:
+        zeit += timedelta(days=1)
+    return zeit
+
+
+# --- pmset: weckt den Mac aus dem Ruhezustand, eine Minute vor dem Wecker
+
+def pmset(*argumente: str) -> bool:
+    """Ruft "pmset schedule" über sudo ohne Passwort auf; geht nur nach pmset_einrichten()."""
+    ergebnis = subprocess.run(["sudo", "-n", "/usr/bin/pmset", "schedule", *argumente],
+                              capture_output=True, text=True)
+    return ergebnis.returncode == 0
+
+
+def pmset_eingerichtet() -> bool:
+    ergebnis = subprocess.run(["sudo", "-n", "-l", "/usr/bin/pmset", "schedule", "wake", "01/01/30 00:00:00"],
+                              capture_output=True, text=True)
+    return ergebnis.returncode == 0
+
+
+def pmset_einrichten() -> None:
+    """Erlaubt (nach einmaliger Admin-Abfrage) nur "pmset schedule wake/cancel wake" ohne Passwort."""
+    regel = (f"# heyAtlas: Mac vor einem Wecker aus dem Ruhezustand wecken\n"
+             f"{os.environ['USER']} ALL=(root) NOPASSWD: /usr/bin/pmset schedule wake *, "
+             f"/usr/bin/pmset schedule cancel wake *\n")
+    os.makedirs(DATENORDNER, exist_ok=True)
+    entwurf = os.path.join(DATENORDNER, "sudoers-heyatlas")
+    with open(entwurf, "w") as datei:
+        datei.write(regel)
+    # visudo prüft die Regel, bevor sie aktiv wird; eine kaputte sudoers-Datei würde sudo blockieren
+    befehl = (f"/usr/sbin/visudo -cf {sh(entwurf)} && "
+              f"/usr/bin/install -m 0440 -o root -g wheel {sh(entwurf)} {SUDOERS_DATEI}")
+    osascript('on run argv\ndo shell script (item 1 of argv) with administrator privileges\nend run', befehl)
+    os.remove(entwurf)
+    with _uhr_sperre:
+        for w in _wecker:
+            wecker_aufwecken_planen(w)
+        wecker_speichern()
+
+
+def pmset_entfernen() -> None:
+    with _uhr_sperre:
+        for w in _wecker:
+            if w.get("wake"):
+                pmset("cancel", "wake", w["wake"], PMSET_BESITZER)
+                w["wake"] = ""
+        wecker_speichern()
+    osascript('on run argv\ndo shell script (item 1 of argv) with administrator privileges\nend run',
+              f"/bin/rm -f {SUDOERS_DATEI}")
+
+
+def sh(text: str) -> str:
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def wecker_aufwecken_planen(w: dict) -> None:
+    """Plant das Aufwecken für einen Wecker neu (alte Planung wird vorher gelöscht)."""
+    if w.get("wake"):
+        pmset("cancel", "wake", w["wake"], PMSET_BESITZER)
+        w["wake"] = ""
+    aufwachen = datetime.fromisoformat(w["zeit"]) - timedelta(minutes=1)
+    if aufwachen > datetime.now():
+        zeitpunkt = aufwachen.strftime("%m/%d/%y %H:%M:%S")
+        if pmset("wake", zeitpunkt, PMSET_BESITZER):
+            w["wake"] = zeitpunkt
+
+
+# --- Klingeln
+
+def klingeln(beschreibung: str, ansage: str, max_sek: int) -> None:
+    """Spielt Ton und Ansage im Wechsel mit Pausen, damit "Hey Atlas" dazwischen gehört wird."""
+    stopp = threading.Event()
+    with _uhr_sperre:
+        _klingeln[beschreibung] = stopp
+    wach = subprocess.Popen(["caffeinate", "-i", "-d", "-t", str(max_sek)])  # Mac nicht wieder einschlafen lassen
+    try:
+        ende = time.time() + max_sek
+        while not stopp.is_set() and time.time() < ende:
+            for _ in range(3):
+                ton("Glass")
+            if not stopp.is_set():
+                sprich(ansage)
+            stopp.wait(8)
+    finally:
+        wach.terminate()
+        with _uhr_sperre:
+            _klingeln.pop(beschreibung, None)
+
+
+def klingeln_beenden() -> bool:
+    """Stoppt alles, was gerade klingelt. True, wenn etwas geklingelt hat."""
+    with _uhr_sperre:
+        laeuft = list(_klingeln.values())
+    for stopp in laeuft:
+        stopp.set()
+    return bool(laeuft)
+
+
+def uhr_schleife() -> None:
+    """Prüft jede Sekunde Timer und Wecker. Nutzt die Wanduhr, damit nach dem Ruhezustand nichts verrutscht."""
+    while True:
+        jetzt = datetime.now()
+        faellig = []
+        with _uhr_sperre:
+            for name, ende in list(_timer.items()):
+                if ende <= jetzt:
+                    del _timer[name]
+                    faellig.append((f"Timer {name}", f"Dein Timer {name} ist abgelaufen.", 60))
+            geaendert = False
+            for w in list(_wecker):
+                zeit = datetime.fromisoformat(w["zeit"])
+                if zeit > jetzt:
+                    continue
+                if jetzt - zeit < VERPASST_TOLERANZ:
+                    faellig.append((f"Wecker {w['name']}", f"{w['name']}! Es ist {zeit:%H:%M} Uhr.", 600))
+                if w["tage"]:
+                    w["zeit"] = naechstes_vorkommen(zeit, w["tage"]).isoformat(timespec="minutes")
+                    wecker_aufwecken_planen(w)
+                else:
+                    _wecker.remove(w)
+                geaendert = True
+            if geaendert:
+                wecker_speichern()
+        for beschreibung, ansage, max_sek in faellig:
+            threading.Thread(target=klingeln, args=(beschreibung, ansage, max_sek), daemon=True).start()
+        time.sleep(1)
+
+
+def wann(zeit: datetime) -> str:
+    return f"{WOCHENTAGE[zeit.weekday()].capitalize()} {zeit:%d.%m. %H:%M} Uhr"
+
+
+def dauer_text(sekunden: float) -> str:
+    sekunden = max(0, int(round(sekunden)))
+    h, rest = divmod(sekunden, 3600)
+    m, s = divmod(rest, 60)
+    teile = [f"{h} Std."] * bool(h) + [f"{m} Min."] * bool(m) + [f"{s} Sek."] * bool(s and not h)
+    return " ".join(teile) or "0 Sek."
+
+
+@beta_tool
+def timer_stellen(dauer_sekunden: int, name: str = "Timer") -> str:
+    """Startet einen Timer. Mehrere Timer mit verschiedenen Namen können gleichzeitig laufen.
+
+    Args:
+        dauer_sekunden: Dauer in Sekunden, z. B. 600 für zehn Minuten.
+        name: Kurzer Name, z. B. "Nudeln". Ein Timer gleichen Namens wird ersetzt.
+    """
+    if dauer_sekunden <= 0:
+        return "Die Dauer muss positiv sein."
+    with _uhr_sperre:
+        _timer[name] = datetime.now() + timedelta(seconds=dauer_sekunden)
+    return f"Timer '{name}' gestartet, Dauer {dauer_text(dauer_sekunden)}"
+
+
+@beta_tool
+def timer_abfragen() -> str:
+    """Listet laufende Timer mit Restzeit auf."""
+    jetzt = datetime.now()
+    with _uhr_sperre:
+        laufend = sorted(_timer.items(), key=lambda t: t[1])
+    if not laufend:
+        return "Es läuft kein Timer."
+    return "\n".join(f"{name}: noch {dauer_text((ende - jetzt).total_seconds())}" for name, ende in laufend)
+
+
+@beta_tool
+def timer_abbrechen(name: Optional[str] = None) -> str:
+    """Bricht einen laufenden Timer ab, oder alle, wenn kein Name angegeben ist.
+
+    Args:
+        name: Name des Timers; weglassen für alle.
+    """
+    with _uhr_sperre:
+        namen = [n for n in _timer if name is None or n.lower() == name.lower()]
+        for n in namen:
+            del _timer[n]
+    return f"Abgebrochen: {', '.join(namen)}." if namen else "Kein passender Timer läuft."
+
+
+@beta_tool
+def klingeln_stoppen() -> str:
+    """Schaltet einen gerade klingelnden Wecker oder abgelaufenen Timer aus."""
+    return "Ausgeschaltet." if klingeln_beenden() else "Gerade klingelt nichts."
+
+
+@beta_tool
+def wecker_stellen(zeitpunkt: str, name: str = "Wecker",
+                   wochentage: Optional[List[Literal["mo", "di", "mi", "do", "fr", "sa", "so"]]] = None) -> str:
+    """Stellt einen Wecker, einmalig oder wiederkehrend an bestimmten Wochentagen. Bleibt nach einem Neustart erhalten.
+
+    Args:
+        zeitpunkt: Nächster Weckzeitpunkt im ISO-Format, z. B. 2026-10-12T06:30.
+        name: Kurzer Name, der beim Klingeln angesagt wird, z. B. "Aufstehen".
+        wochentage: Für wiederkehrende Wecker die Tage, z. B. ["mo", "di", "mi", "do", "fr"]; weglassen für einmalig.
+    """
+    zeit = datetime.fromisoformat(zeitpunkt).replace(second=0, microsecond=0)
+    tage = list(wochentage or [])
+    if tage:
+        zeit = naechstes_vorkommen(zeit, tage)  # bleibt gleich, wenn der Zeitpunkt schon passt
+    elif zeit <= datetime.now():
+        return "Dieser Zeitpunkt liegt in der Vergangenheit."
+    with _uhr_sperre:
+        nummer = max([w["id"] for w in _wecker], default=0) + 1
+        w = {"id": nummer, "name": name, "zeit": zeit.isoformat(timespec="minutes"), "tage": tage, "wake": ""}
+        wecker_aufwecken_planen(w)
+        _wecker.append(w)
+        wecker_speichern()
+    wiederholung = f", jeden {', '.join(tage)}" if tage else ""
+    hinweis = "" if w["wake"] else " Hinweis: Der Mac weckt sich dafür nicht selbst auf (pmset nicht eingerichtet)."
+    return f"Wecker W{nummer} '{name}' gestellt auf {wann(zeit)}{wiederholung}.{hinweis}"
+
+
+@beta_tool
+def wecker_auflisten() -> str:
+    """Listet alle gestellten Wecker mit Kennung wie W1 auf."""
+    with _uhr_sperre:
+        alle = sorted(_wecker, key=lambda w: w["zeit"])
+    if not alle:
+        return "Es ist kein Wecker gestellt."
+    return "\n".join(f"[W{w['id']}] {w['name']}: {wann(datetime.fromisoformat(w['zeit']))}"
+                     + (f", wiederholt {', '.join(w['tage'])}" if w["tage"] else "") for w in alle)
+
+
+@beta_tool
+def wecker_loeschen(kennung: str) -> str:
+    """Löscht einen Wecker. Bei wiederkehrenden Weckern fällt die ganze Serie weg.
+
+    Args:
+        kennung: Kennung aus wecker_auflisten, z. B. W2.
+    """
+    nummer = kennung.strip().upper().lstrip("W")
+    with _uhr_sperre:
+        passend = [w for w in _wecker if str(w["id"]) == nummer]
+        if not passend:
+            return f"Unbekannte Kennung {kennung}. Schau mit wecker_auflisten nach."
+        w = passend[0]
+        if w.get("wake"):
+            pmset("cancel", "wake", w["wake"], PMSET_BESITZER)
+        _wecker.remove(w)
+        wecker_speichern()
+    return f"Wecker '{w['name']}' gelöscht."
+
+
 # ---------------------------------------------------------------- Notizen
 
 @beta_tool
@@ -668,6 +956,8 @@ def kurzbefehl_ausfuehren(name: str) -> str:
 
 WERKZEUGE = [erinnerung_anlegen, termine_lesen, termin_anlegen, termin_verschieben, termin_loeschen,
              spotify_abspielen, spotify_steuern, spotify_aktueller_titel, wetter,
+             timer_stellen, timer_abfragen, timer_abbrechen, klingeln_stoppen,
+             wecker_stellen, wecker_auflisten, wecker_loeschen,
              notiz_anlegen, notizen_suchen, nachricht_senden, kurzbefehle_auflisten, kurzbefehl_ausfuehren]
 
 
@@ -700,6 +990,13 @@ def ask(text: str) -> str:
 
 
 def main() -> None:
+    wecker_laden()
+    if "--pmset-einrichten" in sys.argv or "--pmset-entfernen" in sys.argv:
+        pmset_einrichten() if "--pmset-einrichten" in sys.argv else pmset_entfernen()
+        print("pmset eingerichtet: Der Mac wacht vor Weckern auf." if pmset_eingerichtet()
+              else "pmset ist nicht (mehr) eingerichtet.")
+        return
+    threading.Thread(target=uhr_schleife, daemon=True).start()
     if not TEXTMODUS:
         lade_whisper()  # vorab laden, damit die erste Antwort nicht hängt
         lade_stimme()

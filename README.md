@@ -53,6 +53,9 @@ mkdir -p stimmen && cd stimmen && ../.venv/bin/python -m piper.download_voices d
 - `notiz_anlegen`, `notizen_suchen`: Notizen-App
 - `nachricht_senden`: iMessage an einen Kontakt, mit Rückfrage vor dem Senden
 - `kurzbefehle_auflisten`, `kurzbefehl_ausfuehren`: Kurzbefehle aus dem Ordner „Sprachassistent“, z. B. Home-Szenen
+- `timer_stellen`, `timer_abfragen`, `timer_abbrechen`: mehrere benannte Timer gleichzeitig
+- `wecker_stellen`, `wecker_auflisten`, `wecker_loeschen`: einmalig oder an Wochentagen, gespeichert in `~/Library/Application Support/heyAtlas/wecker.json`
+- `klingeln_stoppen`: schaltet Wecker und Timer aus; im Sprachmodus reicht auch einfach „Hey Atlas“
 - `wetter`: aktuelles Wetter und bis zu 7 Tage Vorhersage von Open-Meteo (kostenlos, ohne Schlüssel)
 
 Spotify braucht Client ID und Secret einer App von developer.spotify.com im Schlüsselbund:
@@ -75,3 +78,13 @@ Training mit dem Colab-Notizbuch aus dem README von [openWakeWord](https://githu
 ```sh
 echo 'export WAKEWORD="$HOME/voiceAgent/stimmen/hey_atlas.onnx"' >> ~/.zshrc
 ```
+
+## Mac vor Weckern aufwecken (pmset)
+
+```sh
+.venv/bin/python assistent.py --pmset-einrichten   # fragt einmal nach dem Admin-Passwort
+.venv/bin/python assistent.py --pmset-entfernen
+```
+
+Legt `/etc/sudoers.d/heyatlas` an, das nur `pmset schedule wake …` und `pmset schedule cancel wake …` ohne Passwort erlaubt.
+Atlas weckt den Mac dann eine Minute vor jedem Wecker. Aus dem Ruhezustand klappt das, aus dem ausgeschalteten Zustand nicht.
