@@ -169,3 +169,17 @@ es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.
   **Festplattenvollzugriff** (Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff → heyAtlas),
   den man selbst erteilt; eine App kann ihn nicht abfragen. Diese Berechtigung erlaubt das Lesen aller Dateien;
   heyAtlas öffnet nur die Nachrichten-Datenbank. Beim Ausschalten den Festplattenvollzugriff wieder entziehen.
+
+## Anrufe annehmen (geplant)
+
+Optional und standardmäßig aus: Schalter im Einstellungsmenü. Während es klingelt, „Hey Atlas, nimm an“ oder
+„… lehn ab“; Atlas sagt vorher an, wer anruft. Gilt für FaceTime-Anrufe und für iPhone-Anrufe, die auf dem Mac
+klingeln. Während eines Gesprächs hört Atlas nicht auf das Aktivierungswort.
+
+- Atlas drückt dafür den Knopf in der Anrufanzeige von macOS und braucht **Bedienungshilfen**
+  (Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen → heyAtlas). Diese Berechtigung erlaubt,
+  andere Apps zu bedienen; sie wird nur bei eingeschaltetem Schalter benötigt.
+- **Für iPhone-Anrufe auf dem Mac** müssen eingeschaltet sein:
+  - iPhone → Einstellungen → Apps → Telefon → **Auf anderen Geräten** → diesen Mac erlauben
+  - Mac → FaceTime → Einstellungen → **Anrufe vom iPhone**
+- Hängt am Aufbau der Anrufanzeige; nach macOS-Updates kann eine Anpassung nötig sein.
