@@ -67,7 +67,7 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 - `youtube_abspielen`, `youtube_steuern`: Suche über die YouTube Data API, Wiedergabe im Browser
 - `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Weckern, Nachrichten und ungelesenen Mails (nur Anzahl und Betreffs)
 - Websuche: Claudes eingebaute Websuche für aktuelle Fragen
-- `abfahrten`, `verbindung_suchen`: Bus und Bahn mit Echtzeit über [Transitous](https://transitous.org) ([Datenquellen](https://transitous.org/sources/)); Heimathaltestelle und Kontaktangabe in den Einstellungen
+- `abfahrten`, `verbindung_suchen`: Bus und Bahn mit Echtzeit über [Transitous](https://transitous.org) ([Datenquellen](https://transitous.org/sources/)); Heimathaltestelle und Kontaktangabe in den Einstellungen. Die Nutzung ist mit dem Transitous-Team abgestimmt (Oktober 2026).
 - `wetter`: aktuelles Wetter und bis zu 7 Tage Vorhersage von Open-Meteo (kostenlos, ohne Schlüssel)
 
 Spotify braucht Client ID und Secret einer App von developer.spotify.com im Schlüsselbund:
@@ -147,3 +147,10 @@ packaging/build.sh          # baut build/heyAtlas.app und build/heyAtlas-<Versio
 - Lokal signiert, ohne Apple-Entwicklerkonto: beim ersten Öffnen Rechtsklick → Öffnen. Nach einem Neubau kann
   macOS die Berechtigungen erneut abfragen.
 - Whisper-Modell und Stimme lädt die App beim ersten Start herunter.
+
+## Berechtigungen
+
+Beim ersten Start fragt heyAtlas alle Zugriffe auf einmal ab: Mikrofon, Kalender und Erinnerungen (Vollzugriff)
+sowie die Steuerung von Kalender, Erinnerungen, Notizen, Mail, Nachrichten, Kontakte, Musik, Spotify, Browser und
+Systemereignisse. Dafür startet es nicht laufende Apps kurz unsichtbar und beendet sie danach wieder. Am Ende zeigt
+es eine Übersicht; wiederholen über „Berechtigungen prüfen …“ im Menü.

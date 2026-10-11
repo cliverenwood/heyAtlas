@@ -120,6 +120,7 @@ class AtlasApp(rumps.App):
         self.menu = [
             self.status, self.pause, None,
             self.einstellungsmenue(), None,
+            rumps.MenuItem("Berechtigungen prüfen …", callback=self.berechtigungen_pruefen),
             rumps.MenuItem("Logdatei öffnen", callback=lambda _: subprocess.run(["/usr/bin/open", LOGDATEI])),
             # Von Transitous verlangte sichtbare Quellenangabe für die Fahrplandaten
             rumps.MenuItem("Fahrplandaten: Transitous",
@@ -130,6 +131,7 @@ class AtlasApp(rumps.App):
         self.pmset.state = atlas.pmset_eingerichtet()
         self.letztes_icon = ICON_BEREIT
         self.neustart_angefordert = False  # aus Hintergrund-Threads gesetzt, im Hauptthread ausgeführt
+        self.berechtigungs_bericht = None  # ebenso: Übersicht nach der Abfrage, angezeigt im Hauptthread
         rumps.Timer(self.aktualisieren, 0.3).start()
         threading.Thread(target=self.starte_assistent, daemon=True).start()
 
@@ -177,11 +179,36 @@ class AtlasApp(rumps.App):
     # ------------------------------------------------------------ Assistent
 
     def starte_assistent(self) -> None:
+        # Beim ersten Start alle Zugriffe auf einmal abfragen, nicht erst mitten in der Nutzung
+        if not atlas.einstellungen_laden().get("BERECHTIGUNGEN_EINGERICHTET"):
+            self.berechtigungen_einrichten()
         if not atlas.api_schluessel():
             atlas.melde_status("Anthropic-API-Schlüssel fehlt (Einstellungen → Schlüssel)")
         atlas.main()
 
+    def berechtigungen_einrichten(self) -> None:
+        ergebnisse = atlas.berechtigungen_einrichten()
+        werte = atlas.einstellungen_laden()
+        werte["BERECHTIGUNGEN_EINGERICHTET"] = True
+        atlas.einstellungen_speichern(werte)
+        self.berechtigungs_bericht = ergebnisse
+
+    def berechtigungen_pruefen(self, _eintrag) -> None:
+        threading.Thread(target=self.berechtigungen_einrichten, daemon=True).start()
+
+    @staticmethod
+    def bericht_text(ergebnisse: list) -> str:
+        zeichen = {"erlaubt": "✓", "nicht installiert": "–"}
+        zeilen = [f"{zeichen.get(ergebnis, '✗')} {bereich}: {ergebnis}" for bereich, ergebnis in ergebnisse]
+        if any(ergebnis not in zeichen for _, ergebnis in ergebnisse):
+            zeilen += ["", "Nachträglich erlauben: Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon, "
+                           "Kalender, Erinnerungen bzw. Automation → heyAtlas."]
+        return "\n".join(zeilen)
+
     def aktualisieren(self, _timer) -> None:
+        if self.berechtigungs_bericht is not None:
+            ergebnisse, self.berechtigungs_bericht = self.berechtigungs_bericht, None
+            rumps.alert("Berechtigungen für heyAtlas", self.bericht_text(ergebnisse))
         if self.neustart_angefordert:
             self.neustart_angefordert = False
             self.neustarten()

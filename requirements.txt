@@ -5,3 +5,6 @@ mlx-whisper
 openwakeword
 piper-tts
 pyobjc-framework-EventKit
+rumps
+pyobjc-framework-ServiceManagement
+pyobjc-framework-AVFoundation

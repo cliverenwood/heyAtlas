@@ -1792,6 +1792,92 @@ def verbindung_suchen(ziel: str, start: Optional[str] = None, zeitpunkt: Optiona
     return "\n".join([kopf, *zeilen]) if zeilen else "Keine Verbindung gefunden."
 
 
+# ---------------------------------------------------------------- Berechtigungen beim ersten Start
+
+# Apps, die Atlas per AppleScript steuert: (Anzeigename, App-Name)
+AUTOMATION_ZIELE = [("Kalender", "Calendar"), ("Erinnerungen", "Reminders"), ("Notizen", "Notes"),
+                    ("Mail", "Mail"), ("Nachrichten", "Messages"), ("Kontakte", "Contacts"), ("Musik", "Music"),
+                    ("Spotify", "Spotify"), (BROWSER, BROWSER), ("Systemereignisse", "System Events")]
+
+
+def mikrofon_erlauben() -> str:
+    import AVFoundation
+
+    status = AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(AVFoundation.AVMediaTypeAudio)
+    if status == AVFoundation.AVAuthorizationStatusNotDetermined:
+        fertig, ergebnis = threading.Event(), {}
+
+        def antwort(erlaubt):
+            ergebnis["erlaubt"] = erlaubt
+            fertig.set()
+
+        AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+            AVFoundation.AVMediaTypeAudio, antwort)
+        fertig.wait(300)
+        return "erlaubt" if ergebnis.get("erlaubt") else "abgelehnt"
+    return "erlaubt" if status == AVFoundation.AVAuthorizationStatusAuthorized else "abgelehnt"
+
+
+def eventkit_erlauben(art: str) -> str:
+    try:
+        kalender_speicher(art)
+        return "erlaubt"
+    except RuntimeError:
+        return "abgelehnt"
+
+
+def automation_erlauben(app: str) -> str:
+    """Löst die Abfrage "heyAtlas möchte <App> steuern" aus. macOS fragt erst beim ersten echten Befehl, und dafür
+    muss die App laufen; nicht laufende Apps startet Atlas dazu unsichtbar und beendet sie danach wieder."""
+    if app != "System Events" and subprocess.run(["/usr/bin/open", "-Ra", app], capture_output=True).returncode:
+        return "nicht installiert"
+    lief = osascript(f'application "{app}" is running') == "true"
+    if not lief:
+        subprocess.run(["/usr/bin/open", "-g", "-j", "-a", app], capture_output=True)
+        for _ in range(40):  # bis zu 10 Sekunden auf den Start warten
+            if osascript(f'application "{app}" is running') == "true":
+                break
+            time.sleep(0.25)
+    befehl = "count processes" if app == "System Events" else "count windows"
+    # Lange Wartezeit: Der Dialog bleibt offen, bis der Nutzer antwortet
+    ergebnis = subprocess.run(["/usr/bin/osascript", "-e", f'tell application "{app}" to {befehl}'],
+                              capture_output=True, text=True, timeout=300)
+    if not lief and app != "System Events":
+        app_beenden_ohne_steuerung(app)
+    if ergebnis.returncode == 0:
+        return "erlaubt"
+    return "abgelehnt" if "-1743" in ergebnis.stderr else f"Fehler: {ergebnis.stderr.strip()[:60]}"
+
+
+def app_beenden_ohne_steuerung(app: str) -> None:
+    """Beendet eine App über macOS selbst statt per AppleScript; das klappt auch, wenn die Steuerung abgelehnt
+    wurde. Die Kennung ("id of application") liest AppleScript aus dem App-Paket, ohne die App anzusprechen."""
+    from AppKit import NSRunningApplication
+
+    kennung = subprocess.run(["/usr/bin/osascript", "-e", f'id of application "{app}"'],
+                             capture_output=True, text=True).stdout.strip()
+    for laufend in NSRunningApplication.runningApplicationsWithBundleIdentifier_(kennung) if kennung else []:
+        laufend.terminate()
+
+
+def berechtigungen_einrichten() -> list:
+    """Fragt alle Zugriffe nacheinander ab. Liefert [(Bereich, Ergebnis)] für die Übersicht."""
+    schritte = [("Mikrofon", mikrofon_erlauben),
+                ("Kalender (Vollzugriff)", lambda: eventkit_erlauben("termine")),
+                ("Erinnerungen (Vollzugriff)", lambda: eventkit_erlauben("erinnerungen"))]
+    schritte += [(f"Steuerung: {anzeige}", lambda app=app: automation_erlauben(app))
+                 for anzeige, app in AUTOMATION_ZIELE]
+    ergebnisse = []
+    for nummer, (bereich, abfrage) in enumerate(schritte, 1):
+        melde_status(f"Berechtigungen {nummer}/{len(schritte)}: {bereich}")
+        try:
+            ergebnisse.append((bereich, abfrage()))
+        except Exception as fehler:  # ein fehlgeschlagener Schritt soll die übrigen nicht verhindern
+            ergebnisse.append((bereich, f"Fehler: {str(fehler)[:60]}"))
+        print(f"Berechtigung {bereich}: {ergebnisse[-1][1]}")
+    return ergebnisse
+
+
 # ---------------------------------------------------------------- Kurzbefehle (z. B. Home-Szenen)
 
 def erlaubte_kurzbefehle() -> list:
