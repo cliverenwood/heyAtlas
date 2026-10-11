@@ -212,7 +212,16 @@ class AtlasApp(rumps.App):
             self.berechtigungen_einrichten()
         if not atlas.api_schluessel():
             atlas.melde_status("Anthropic-API-Schlüssel fehlt (Einstellungen → Schlüssel)")
-        atlas.main()
+        while True:  # ein Fehler beim Start (z. B. in der Sprachausgabe) soll Atlas nicht dauerhaft lahmlegen
+            try:
+                atlas.main()
+                return
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                atlas.melde_status("Fehler beim Start, versuche es erneut …")
+                time.sleep(5)
 
     def berechtigungen_einrichten(self) -> None:
         ergebnisse = atlas.berechtigungen_einrichten()

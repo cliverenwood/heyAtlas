@@ -1397,22 +1397,51 @@ def nachrichtentext(text: Optional[str], attributed: Optional[bytes]) -> str:
         return ""
 
 
-def nachrichten_db_lesen(seit_tagen: int, nur_ungelesen: bool) -> list:
+KEIN_FESTPLATTENZUGRIFF = ("Kein Zugriff auf die Nachrichten. heyAtlas braucht Festplattenvollzugriff: "
+                           "Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff.")
+
+
+def nachrichten_db_lesbar() -> bool:
+    """Prüft nur die Berechtigung: Ohne Festplattenvollzugriff verweigert macOS schon das Öffnen der Datei."""
+    try:
+        with open(NACHRICHTEN_DB, "rb") as datei:
+            datei.read(16)
+        return True
+    except OSError:
+        return False
+
+
+def _nachrichten_abfragen(pfad: str, parameter: tuple) -> list:
     import sqlite3
 
-    seit = (time.time() - max(0, seit_tagen) * 86400 - APPLE_EPOCHE) * 1_000_000_000
+    verbindung = sqlite3.connect(f"file:{pfad}?mode=ro", uri=True)
     try:
-        verbindung = sqlite3.connect(f"file:{NACHRICHTEN_DB}?mode=ro", uri=True)
-    except sqlite3.OperationalError as fehler:
-        raise RuntimeError("Kein Zugriff auf die Nachrichten. heyAtlas braucht Festplattenvollzugriff: "
-                           "Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff.") from fehler
-    try:
-        return verbindung.execute(NACHRICHTEN_ABFRAGE, (seit, 1 if nur_ungelesen else 0)).fetchall()
-    except sqlite3.DatabaseError as fehler:
-        raise RuntimeError("Kein Zugriff auf die Nachrichten. heyAtlas braucht Festplattenvollzugriff: "
-                           "Systemeinstellungen → Datenschutz & Sicherheit → Festplattenvollzugriff.") from fehler
+        return verbindung.execute(NACHRICHTEN_ABFRAGE, parameter).fetchall()
     finally:
         verbindung.close()
+
+
+def nachrichten_db_lesen(seit_tagen: int, nur_ungelesen: bool) -> list:
+    import shutil
+    import sqlite3
+    import tempfile
+
+    if not nachrichten_db_lesbar():
+        raise RuntimeError(KEIN_FESTPLATTENZUGRIFF)
+    seit = (time.time() - max(0, seit_tagen) * 86400 - APPLE_EPOCHE) * 1_000_000_000
+    parameter = (seit, 1 if nur_ungelesen else 0)
+    try:
+        return _nachrichten_abfragen(NACHRICHTEN_DB, parameter)
+    except sqlite3.DatabaseError as fehler:
+        # Nur-Lesen kann an den Zwischendateien (-wal, -shm) der Nachrichten-App scheitern, etwa wenn sie nicht
+        # läuft. Dann eine Kopie samt Zwischendateien lesen: die neuesten Nachrichten sind dabei, das Original bleibt
+        # unberührt.
+        print(f"Nachrichten-Datenbank direkt nicht lesbar ({fehler}), lese eine Kopie", file=sys.stderr)
+        with tempfile.TemporaryDirectory() as ordner:
+            for endung in ("", "-wal", "-shm"):
+                if os.path.exists(NACHRICHTEN_DB + endung):
+                    shutil.copy2(NACHRICHTEN_DB + endung, os.path.join(ordner, "chat.db" + endung))
+            return _nachrichten_abfragen(os.path.join(ordner, "chat.db"), parameter)
 
 
 @beta_tool
@@ -2038,11 +2067,7 @@ def app_beenden_ohne_steuerung(app: str) -> None:
 
 def festplattenvollzugriff_pruefen() -> str:
     """Festplattenvollzugriff kann keine App abfragen, nur prüfen; erteilt wird er in den Systemeinstellungen."""
-    try:
-        nachrichten_db_lesen(0, True)
-        return "erlaubt"
-    except RuntimeError:
-        return "abgelehnt"
+    return "erlaubt" if nachrichten_db_lesbar() else "abgelehnt"
 
 
 def berechtigungen_einrichten() -> list:
@@ -2076,89 +2101,76 @@ def berechtigungen_einrichten() -> list:
 ANNEHMEN = ("Annehmen", "Accept", "Answer")
 ABLEHNEN = ("Ablehnen", "Decline")
 AUFLEGEN = ("Beenden", "Auflegen", "End", "Leave")
-ANRUF_PROZESSE = ("NotificationCenter", "FaceTime")
 
-# Beschriftung eines Knopfs: bei Mitteilungen steht sie oft nur in der Beschreibung, der Name ist leer
-BESCHRIFTUNG = """
-on beschriftung(element)
-    tell application "System Events"
-        set bez to ""
-        try
-            set bez to name of element as text
-        end try
-        if bez is "" or bez is "missing value" then
-            try
-                set bez to description of element as text
-            end try
-        end if
-        return bez
-    end tell
-end beschriftung
-"""
+# Direkt über die Bedienungshilfen-Schnittstelle statt per AppleScript: Bei AppleScript prüft macOS die
+# Berechtigung von osascript statt von heyAtlas ("osascript is not allowed assistive access", -25211).
+ANRUF_APPS = {"com.apple.notificationcenterui": "NotificationCenter", "com.apple.FaceTime": "FaceTime"}
+AX_KEIN_ZUGRIFF = -25211
 
-# Liefert je Fenster mit Knöpfen eine Zeile "Prozess<31>Knopf;Knopf;<31>Text;Text;"
-ANRUF_ANZEIGE = BESCHRIFTUNG + """set feld to character id 31
-set ausgabe to ""
-tell application "System Events"
-    repeat with prozessname in {"NotificationCenter", "FaceTime"}
-        if exists process prozessname then
-            tell process prozessname
-                repeat with fenster in windows
-                    set knoepfe to ""
-                    set texte to ""
-                    repeat with element in (entire contents of fenster)
-                        try
-                            set art to role of element
-                            if art is "AXButton" then set knoepfe to knoepfe & my beschriftung(element) & ";"
-                            if art is "AXStaticText" then set texte to texte & (value of element as text) & ";"
-                        end try
-                    end repeat
-                    if knoepfe is not "" then ¬
-                        set ausgabe to ausgabe & prozessname & feld & knoepfe & feld & texte & linefeed
-                end repeat
-            end tell
-        end if
-    end repeat
-end tell
-return ausgabe"""
 
-# Drückt den ersten Knopf mit einer der Beschriftungen aus argv
-ANRUF_KNOPF = BESCHRIFTUNG + """on run argv
-    tell application "System Events"
-        repeat with prozessname in {"NotificationCenter", "FaceTime"}
-            if exists process prozessname then
-                tell process prozessname
-                    repeat with fenster in windows
-                        repeat with element in (entire contents of fenster)
-                            try
-                                if role of element is "AXButton" then
-                                    set bez to my beschriftung(element)
-                                    if argv contains bez then
-                                        perform action "AXPress" of element
-                                        return bez
-                                    end if
-                                end if
-                            end try
-                        end repeat
-                    end repeat
-                end tell
-            end if
-        end repeat
-    end tell
+def _ax(element, attribut):
+    import ApplicationServices
+
+    fehler, wert = ApplicationServices.AXUIElementCopyAttributeValue(element, attribut, None)
+    if fehler == AX_KEIN_ZUGRIFF:
+        raise RuntimeError(f"Bedienungshilfen fehlen ({AX_KEIN_ZUGRIFF})")
+    return wert if fehler == 0 else None
+
+
+def _ax_sammeln(element, knoepfe: list, texte: list, tiefe: int = 0) -> None:
+    """Knöpfe (Beschriftung, Element) und Texte eines Fensters; Tiefe und Menge begrenzt."""
+    import ApplicationServices
+
+    if tiefe > 12 or len(knoepfe) + len(texte) > 300:
+        return
+    rolle = _ax(element, ApplicationServices.kAXRoleAttribute)
+    if rolle == "AXButton":
+        # Bei Mitteilungen steht die Beschriftung oft nur in der Beschreibung, der Titel ist leer
+        beschriftung = (_ax(element, ApplicationServices.kAXTitleAttribute)
+                        or _ax(element, ApplicationServices.kAXDescriptionAttribute))
+        if beschriftung:
+            knoepfe.append((str(beschriftung), element))
+    elif rolle == "AXStaticText" and _ax(element, ApplicationServices.kAXValueAttribute):
+        texte.append(str(_ax(element, ApplicationServices.kAXValueAttribute)))
+    for kind in _ax(element, ApplicationServices.kAXChildrenAttribute) or []:
+        _ax_sammeln(kind, knoepfe, texte, tiefe + 1)
+
+
+def _anruf_fenster() -> list:
+    """[(Prozess, [(Beschriftung, Element)], [Texte])] aller Fenster von Mitteilungen und FaceTime mit Knöpfen."""
+    import ApplicationServices
+    from AppKit import NSRunningApplication
+
+    ergebnis = []
+    for kennung, name in ANRUF_APPS.items():
+        for app in NSRunningApplication.runningApplicationsWithBundleIdentifier_(kennung):
+            programm = ApplicationServices.AXUIElementCreateApplication(app.processIdentifier())
+            for fenster in _ax(programm, ApplicationServices.kAXWindowsAttribute) or []:
+                knoepfe, texte = [], []
+                _ax_sammeln(fenster, knoepfe, texte)
+                if knoepfe:
+                    ergebnis.append((name, knoepfe, texte))
+    return ergebnis
+
+
+def anruf_knopf_druecken(beschriftungen: tuple) -> str:
+    """Drückt den ersten Knopf mit einer der Beschriftungen; liefert die Beschriftung oder "" """
+    import ApplicationServices
+
+    for _, knoepfe, _ in _anruf_fenster():
+        for beschriftung, element in knoepfe:
+            if beschriftung in beschriftungen:
+                ApplicationServices.AXUIElementPerformAction(element, ApplicationServices.kAXPressAction)
+                return beschriftung
     return ""
-end run"""
+
 
 ANRUF = {"klingelt": False, "anrufer": "", "pausiert_seit": 0.0, "auflegen_gesehen": False}
 
 
 def anrufanzeige() -> list:
-    """[(Prozess, [Knöpfe], [Texte])] aller Fenster der Anrufanzeige mit Knöpfen."""
-    fenster = []
-    for zeile in osascript(ANRUF_ANZEIGE).splitlines():
-        if zeile.count("\x1f") == 2:
-            prozess, knoepfe, texte = zeile.split("\x1f")
-            fenster.append((prozess, [k for k in knoepfe.split(";") if k], [t for t in texte.split(";") if t]))
-    return fenster
+    """[(Prozess, [Knopfbeschriftungen], [Texte])] aller Fenster der Anrufanzeige mit Knöpfen."""
+    return [(prozess, [b for b, _ in knoepfe], texte) for prozess, knoepfe, texte in _anruf_fenster()]
 
 
 def anrufer_aus(texte: list) -> str:
@@ -2239,7 +2251,7 @@ def anruf_ueberwachung() -> None:
 def anruf_annehmen() -> Optional[str]:
     if not ANRUF["klingelt"]:
         return None
-    if not osascript(ANRUF_KNOPF, *ANNEHMEN):
+    if not anruf_knopf_druecken(ANNEHMEN):
         return "Ich finde den Knopf zum Annehmen nicht."
     ANRUF.update(klingelt=False, pausiert_seit=time.time(), auflegen_gesehen=False)
     PAUSIERT.set()  # während des Gesprächs nicht auf das Aktivierungswort hören
@@ -2251,7 +2263,7 @@ def anruf_ablehnen() -> Optional[str]:
     if not ANRUF["klingelt"]:
         return None
     ANRUF["klingelt"] = False
-    return "Abgelehnt." if osascript(ANRUF_KNOPF, *ABLEHNEN) else "Ich finde den Knopf zum Ablehnen nicht."
+    return "Abgelehnt." if anruf_knopf_druecken(ABLEHNEN) else "Ich finde den Knopf zum Ablehnen nicht."
 
 
 def bedienungshilfen_erlaubt(nachfragen: bool = False) -> bool:
