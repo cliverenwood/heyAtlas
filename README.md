@@ -2,7 +2,7 @@
 
 Persönlicher Sprachassistent für macOS (Apple Silicon) mit Claude. Läuft lokal bis auf die Claude-Anfragen; später als Menüleisten-App in einer DMG.
 
-„Hey Jarvis“ → Ton → sprechen → Pause → mlx-whisper (lokal) → Claude mit Werkzeugen → AppleScript → Piper
+„Hey Atlas“ (bis das eigene Modell trainiert ist: „Hey Jarvis“) → Ton → sprechen → Pause → mlx-whisper (lokal) → Claude mit Werkzeugen → AppleScript → Piper
 
 ## Einrichten
 
@@ -66,3 +66,12 @@ security add-generic-password -s spotify-client-secret -a "$USER" -w
 
 `start.command` startet den Assistenten im Terminal und nach einem Absturz neu. Eintragen unter
 Systemeinstellungen → Allgemein → Anmeldeobjekte → „+“ → `start.command` auswählen.
+
+## Eigenes Aktivierungswort „Hey Atlas“
+
+Training mit dem Colab-Notizbuch aus dem README von [openWakeWord](https://github.com/dscripka/openWakeWord)
+(Phrase `hey atlas`). Die fertige Datei nach `stimmen/hey_atlas.onnx` legen und eintragen:
+
+```sh
+echo 'export WAKEWORD="$HOME/voiceAgent/stimmen/hey_atlas.onnx"' >> ~/.zshrc
+```

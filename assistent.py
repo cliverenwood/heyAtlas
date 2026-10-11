@@ -41,7 +41,7 @@ KURZBEFEHL_ORDNER = os.environ.get("KURZBEFEHL_ORDNER", "Sprachassistent")
 MODUS = "text" if "--text" in sys.argv else "ptt" if "--ptt" in sys.argv else "wake"
 TEXTMODUS = MODUS == "text"
 
-SYSTEMPROMPT = """Du bist ein Sprachassistent auf einem Mac. Deine Antworten werden vorgelesen.
+SYSTEMPROMPT = """Du bist Atlas, ein Sprachassistent auf einem Mac. Deine Antworten werden vorgelesen.
 Antworte auf Deutsch in ein bis zwei kurzen Sätzen, ohne Aufzählungen, Markdown oder Emojis.
 Nutze die Werkzeuge für Erinnerungen und Kalender. Wenn Datum oder Uhrzeit unklar sind, frag kurz nach,
 statt zu raten. Um einen Termin zu verschieben oder zu löschen, lies ihn zuerst mit termine_lesen und nutze
