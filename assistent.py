@@ -314,7 +314,7 @@ return "nein"
 
 def _app_anhalten(app: str) -> bool:
     try:
-        # Kurze Timeout: Ein App, das auf Apple Events nicht antwortet (z. B. offener Dialog),
+        # Kurzer Timeout: Eine App, die auf Apple Events nicht antwortet (z. B. offener Dialog),
         # darf die Runde nicht blockieren – sonst geht der Befehl nach dem Wake-Word verloren.
         return osascript(_anhalte_skript(app), timeout=5) == "ja"
     except (RuntimeError, subprocess.TimeoutExpired) as fehler:
@@ -350,7 +350,7 @@ def wiedergabe_fortsetzen(angehalten: list) -> None:
 
 
 def wiedergabe_anhalten_starten() -> None:
-    """Hält die Wiedergabe im Hintergrund an, damit ein App ohne Apple-Event-Antwort (z. B. offener Dialog)
+    """Hält die Wiedergabe im Hintergrund an, damit eine App ohne Apple-Event-Antwort (z. B. offener Dialog)
     den Signalton nach dem Wake-Word nicht verzögert."""
     global _anhalten_thread
 
