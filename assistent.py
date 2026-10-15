@@ -291,6 +291,7 @@ def wiedergabe_gestartet() -> None:
 # Nach "Hey Atlas" hält Atlas laufende Musik und Videos an, damit sie nicht in die Aufnahme geraten, und setzt sie
 # nach der Antwort fort; außer der Nutzer wollte ausdrücklich Pause oder hat etwas Neues gestartet
 _angehalten: list = []  # was Atlas für die aktuelle Frage angehalten hat: "Spotify", "Music", "YouTube"
+_anhalten_thread: Optional[threading.Thread] = None  # hält die Wiedergabe im Hintergrund an
 _wiedergabe_pausiert = threading.Event()
 
 
@@ -298,39 +299,41 @@ def wiedergabe_pausiert() -> None:
     _wiedergabe_pausiert.set()
 
 
-PLAYER_ANHALTEN = """set angehalten to ""
-if application "Spotify" is running then
-    tell application "Spotify"
+def _anhalte_skript(app: str) -> str:
+    return f"""if application "{app}" is running then
+    tell application "{app}"
         if player state is playing then
             pause
-            set angehalten to angehalten & "Spotify,"
+            return "ja"
         end if
     end tell
 end if
-if application "Music" is running then
-    tell application "Music"
-        if player state is playing then
-            pause
-            set angehalten to angehalten & "Music,"
-        end if
-    end tell
-end if
-return angehalten"""
+return "nein"
+"""
+
+
+def _app_anhalten(app: str) -> bool:
+    try:
+        # Kurze Timeout: Ein App, das auf Apple Events nicht antwortet (z. B. offener Dialog),
+        # darf die Runde nicht blockieren – sonst geht der Befehl nach dem Wake-Word verloren.
+        return osascript(_anhalte_skript(app), timeout=5) == "ja"
+    except (RuntimeError, subprocess.TimeoutExpired) as fehler:
+        print(f"{app} anhalten: {fehler}", file=sys.stderr)
+        return False
+
+
+PLAYER_ANHALTEN_APPS = ("Spotify", "Music")
 YOUTUBE_ANHALTEN = ("(function(){var v=document.querySelector('video'); if(!v||v.paused) return 'nein';"
                     " v.pause(); return 'ok';})()")
 YOUTUBE_FORTSETZEN = "(function(){var v=document.querySelector('video'); if(v) v.play(); return 'ok';})()"
 
 
 def wiedergabe_anhalten() -> list:
-    angehalten = []
+    angehalten = [app for app in PLAYER_ANHALTEN_APPS if _app_anhalten(app)]
     try:
-        angehalten += [quelle for quelle in osascript(PLAYER_ANHALTEN).split(",") if quelle]
-    except RuntimeError as fehler:
-        print(f"Musik anhalten: {fehler}", file=sys.stderr)
-    try:
-        if youtube_js(YOUTUBE_ANHALTEN) == "ok":
+        if youtube_js(YOUTUBE_ANHALTEN, timeout=5) == "ok":
             angehalten.append("YouTube")
-    except RuntimeError:
+    except (RuntimeError, subprocess.TimeoutExpired):
         pass  # z. B. "JavaScript von Apple Events" in Safari nicht erlaubt: Video läuft dann eben weiter
     return angehalten
 
@@ -339,11 +342,31 @@ def wiedergabe_fortsetzen(angehalten: list) -> None:
     for quelle in angehalten:
         try:
             if quelle == "YouTube":
-                youtube_js(YOUTUBE_FORTSETZEN)
+                youtube_js(YOUTUBE_FORTSETZEN, timeout=5)
             else:
-                osascript(f'tell application "{quelle}" to play')
-        except RuntimeError as fehler:
+                osascript(f'tell application "{quelle}" to play', timeout=5)
+        except (RuntimeError, subprocess.TimeoutExpired) as fehler:
             print(f"Fortsetzen {quelle}: {fehler}", file=sys.stderr)
+
+
+def wiedergabe_anhalten_starten() -> None:
+    """Hält die Wiedergabe im Hintergrund an, damit ein App ohne Apple-Event-Antwort (z. B. offener Dialog)
+    den Signalton nach dem Wake-Word nicht verzögert."""
+    global _anhalten_thread
+
+    def ausfuehren() -> None:
+        _angehalten[:] = wiedergabe_anhalten()
+
+    _anhalten_thread = threading.Thread(target=ausfuehren, daemon=True)
+    _anhalten_thread.start()
+
+
+def wiedergabe_anhalten_abwarten() -> None:
+    """Wartet, bis die Wiedergabe angehalten ist, damit _angehalten vollständig ist, bevor Atlas sie fortsetzt."""
+    global _anhalten_thread
+    if _anhalten_thread is not None:
+        _anhalten_thread.join()
+        _anhalten_thread = None
 
 
 def ton(name: str) -> None:
@@ -403,8 +426,14 @@ def lade_wakeword():
     return _wakeword
 
 
+# True, wenn die letzte Aufnahme bis max_sek lief, ohne dass eine Sprechpause kam –
+# dann war es durchgehendes Geräusch (Musik, Klingelton), kein Befehl
+_aufnahme_lief_voll = False
+
+
 def nimm_auf_bis_stille(stille_sek: float = 0.7, max_warten_sek: float = 5.0, max_sek: float = 20.0):
     """Signalton, dann Aufnahme bis zu einer Sprechpause. Gibt float32-Audio mit 16 kHz zurück."""
+    global _aufnahme_lief_voll
     import numpy as np
     import sounddevice as sd
 
@@ -430,9 +459,12 @@ def nimm_auf_bis_stille(stille_sek: float = 0.7, max_warten_sek: float = 5.0, ma
             else:
                 still += dauer
             if gesprochen and still >= stille_sek:
+                _aufnahme_lief_voll = False
                 break
             if not gesprochen and len(teile) * dauer > max_warten_sek:
+                _aufnahme_lief_voll = False
                 return np.zeros(0, dtype="float32")
+    _aufnahme_lief_voll = True  # keine Sprechpause: durchgehendes Geräusch, kein Befehl
     ton("Pop")
     return np.concatenate(teile)
 
@@ -468,7 +500,7 @@ def hoere(direkt: bool = False, max_warten_sek: float = 5.0) -> str:
             if klingeln_beenden():
                 sprich("Okay, ist aus.")
                 return ""
-            _angehalten[:] = wiedergabe_anhalten()
+            wiedergabe_anhalten_starten()  # im Hintergrund: der Signalton darf nicht auf das Anhalten warten
         audio = nimm_auf_bis_stille(max_warten_sek=max_warten_sek)
     text = transcribe(audio)
     print(f"📝 {text}")
@@ -501,10 +533,10 @@ end mkdate
 """
 
 
-def osascript(skript: str, *argumente: str) -> str:
+def osascript(skript: str, *argumente: str, timeout: float = 60) -> str:
     """Führt AppleScript aus. Werte gehen als argv hinein, nie per String-Verkettung ins Skript."""
     ergebnis = subprocess.run(["/usr/bin/osascript", "-e", skript, *argumente],
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, timeout=timeout)
     if ergebnis.returncode != 0:
         raise RuntimeError(ergebnis.stderr.strip())
     return ergebnis.stdout.strip()
@@ -1823,7 +1855,7 @@ YOUTUBE_JS = {
 }
 
 
-def youtube_js(js: str) -> str:
+def youtube_js(js: str, timeout: float = 60) -> str:
     """Führt JavaScript im ersten YouTube-Tab aus. "kein Tab", wenn keiner offen ist oder der Browser nicht läuft
     (ein nicht laufender Browser wird bewusst nicht gestartet)."""
     if BROWSER == "Google Chrome":
@@ -1840,7 +1872,7 @@ def youtube_js(js: str) -> str:
         end repeat
     end tell
     return "kein Tab"
-end run""", js)
+end run""", js, timeout=timeout)
 
 
 @beta_tool
@@ -2874,6 +2906,7 @@ def eine_runde(folgefrage: bool) -> bool:
     """Hört zu und antwortet einmal. Liefert, ob danach ohne Wake-Word weitergehört werden soll."""
     # Nach einer Antwort kurz ohne Wake-Word weiterhören; Stille führt zurück zum Wake-Word
     text = hoere(direkt=True, max_warten_sek=NACHFRAGE_SEK) if folgefrage else hoere()
+    wiedergabe_anhalten_abwarten()  # _angehalten muss vollständig sein, bevor Atlas die Wiedergabe fortsetzt
     _wiedergabe_gestartet.clear()
     _wiedergabe_pausiert.clear()
     try:
@@ -2888,6 +2921,8 @@ def eine_runde(folgefrage: bool) -> bool:
         if fortsetzen:
             wiedergabe_fortsetzen(list(_angehalten))
         _angehalten.clear()
+    if _aufnahme_lief_voll:
+        return False  # durchgehendes Geräusch ohne Sprechpause, kein Nachhören: sonst hört Atlas endlos weiter
     if not text or fortsetzen or _wiedergabe_gestartet.is_set() or PAUSIERT.is_set():
         return False  # läuft wieder etwas oder ein Anruf, kein Nachhören: der Ton landete sonst in der Aufnahme
     return MODUS == "wake" and NACHFRAGE_SEK > 0 and not musik_laeuft()
