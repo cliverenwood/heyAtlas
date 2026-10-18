@@ -8,6 +8,7 @@ Start:  python3 assistent.py          (Wake-Word, Aufnahme endet bei einer Sprec
                                       (Mac vor Weckern aus dem Ruhezustand wecken; fragt einmal nach dem Admin-Passwort)
 """
 
+import atexit
 import base64
 import getpass
 import json
@@ -55,6 +56,11 @@ def einstellung(name: str, standard: str) -> str:
 
 
 MODELL = einstellung("CLAUDE_MODELL", "claude-sonnet-5")  # gemessen etwa doppelt so schnell wie claude-opus-5
+# Lokales Sprachmodell aus LM Studio statt Claude: "lmstudio:<Modellschlüssel>", z. B. "lmstudio:qwen3.6-35b-a3b-mlx"
+LMSTUDIO_PRAEFIX = "lmstudio:"
+LOKALES_MODELL = MODELL[len(LMSTUDIO_PRAEFIX):] if MODELL.startswith(LMSTUDIO_PRAEFIX) else ""
+LMSTUDIO_URL = einstellung("LMSTUDIO_URL", "http://localhost:1234")
+LMS = os.path.expanduser("~/.lmstudio/bin/lms")
 # Piper-Stimme: Name wie "de_DE-thorsten-medium" oder Pfad zu einer .onnx-Datei
 STIMME = einstellung("STIMME", "de_DE-thorsten-medium")
 STIMMEN_ORDNER = os.path.join(DATENORDNER, "stimmen")
@@ -67,7 +73,11 @@ FAHRPLAN_KONTAKT = einstellung("FAHRPLAN_KONTAKT", "+https://github.com/cliveren
 BROWSER = einstellung("BROWSER", "Safari")  # für YouTube: "Safari" oder "Google Chrome"
 if BROWSER not in ("Safari", "Google Chrome"):  # der Name landet im AppleScript, deshalb nur bekannte Werte
     BROWSER = "Safari"
+# "cohere" (Cohere Transcribe über transcribe.cpp, gemessen genauer und schneller) oder "whisper" (mlx-whisper)
+SPRACHERKENNUNG = einstellung("SPRACHERKENNUNG", "cohere")
 WHISPER_MODELL = einstellung("WHISPER_MODELL", "mlx-community/whisper-small-mlx")
+COHERE_REPO = "handy-computer/cohere-transcribe-03-2026-gguf"  # Apache-2.0, dieselbe Datei wie in der App Handy
+COHERE_DATEI = einstellung("COHERE_DATEI", "cohere-transcribe-03-2026-Q5_K_M.gguf")
 ABTASTRATE = 16000
 
 # Pfad zu einer .onnx-Datei oder ein mitgeliefertes openWakeWord-Modell (hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
@@ -107,6 +117,12 @@ Sagt der Nutzer "Guten Morgen" oder bittet um ein Briefing, hole parallel das We
 Wecker, die Nachrichten und die ungelesenen Mails und fasse alles in vier bis fünf Sätzen zusammen: Nachrichten nur
 mit den zwei wichtigsten Schlagzeilen, Mails in einem einzigen Satz mit ihrer Anzahl und knapp den Betreffs der
 höchstens drei neuesten, ohne Inhalte."""
+
+# Lokale Modelle haben keine Websuche
+SYSTEMPROMPT_LOKAL = SYSTEMPROMPT.replace(
+    "Für aktuelle Fakten, die kein anderes\nWerkzeug liefert, nutze die Websuche; nenne danach nur das Wichtigste in "
+    "ein bis zwei Sätzen, ohne Quellen.",
+    "Eine Websuche hast du nicht; sag bei\naktuellen Fakten ohne passendes Werkzeug ehrlich, dass du sie nicht weißt.")
 
 SCHLUESSELBUND_DIENST = "anthropic-api-key"
 
@@ -149,9 +165,12 @@ _client = None
 
 
 def claude() -> anthropic.Anthropic:
-    """Claude-Client, erst beim ersten Gebrauch erzeugt. So startet die App auch ohne Schlüssel
+    """Claude-Client (oder LM Studio), erst beim ersten Gebrauch erzeugt. So startet die App auch ohne Schlüssel
     und kann danach fragen."""
     global _client
+    if _client is None and LOKALES_MODELL:
+        # LM Studio spricht die Anthropic-Schnittstelle; der Schlüssel wird dort nicht geprüft
+        _client = anthropic.Anthropic(base_url=LMSTUDIO_URL, api_key="lmstudio", timeout=180)
     if _client is None:
         schluessel = api_schluessel()
         if not schluessel:
@@ -162,6 +181,60 @@ def claude() -> anthropic.Anthropic:
             default_headers={"anthropic-workspace-id": WORKSPACE_ID} if WORKSPACE_ID else None,
         )
     return _client
+
+
+def lmstudio_modelle() -> list:
+    """In LM Studio heruntergeladene Sprachmodelle, die Werkzeuge aufrufen können (für das Menü)."""
+    try:
+        ausgabe = subprocess.run([LMS, "ls", "--llm", "--json"], capture_output=True, text=True, timeout=15).stdout
+        return [m for m in json.loads(ausgabe) if m.get("trainedForToolUse")]
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []
+
+
+def _lms_geladen() -> list:
+    try:
+        return json.loads(subprocess.run([LMS, "ps", "--json"], capture_output=True, text=True, timeout=15).stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def _lms_laden() -> subprocess.CompletedProcess:
+    return subprocess.run([LMS, "load", LOKALES_MODELL, "-y", "-c", "32768", "--identifier", LOKALES_MODELL],
+                          capture_output=True, text=True, timeout=600)
+
+
+def lokales_modell_laden() -> None:
+    """Startet den LM-Studio-Server und lädt das gewählte Modell, falls es noch nicht geladen ist.
+    Beim Laden über die Schnittstelle nähme LM Studio seine Standard-Kontextlänge, die für Systemprompt
+    und Werkzeugbeschreibungen zu knapp sein kann."""
+    if not os.path.exists(LMS):
+        raise RuntimeError("LM Studio ist nicht installiert (lms fehlt).")
+    subprocess.run([LMS, "server", "start"], capture_output=True, timeout=60)
+    geladen = _lms_geladen()
+    if any(m.get("identifier") == LOKALES_MODELL for m in geladen):
+        return
+    melde_status("Lade lokales Sprachmodell …")
+    print(f"Lade '{LOKALES_MODELL}' in LM Studio …")
+    ergebnis = _lms_laden()
+    if ergebnis.returncode != 0 and "insufficient system resources" in ergebnis.stdout + ergebnis.stderr:
+        # Ein anderes geladenes Sprachmodell belegt den Speicher (gemessen: 27B und 35B passen nicht zusammen)
+        for modell in geladen:
+            if modell.get("type") == "llm":
+                print(f"Entlade '{modell['identifier']}', um Platz zu schaffen …")
+                subprocess.run([LMS, "unload", modell["identifier"]], capture_output=True, timeout=60)
+        ergebnis = _lms_laden()
+    if ergebnis.returncode != 0:
+        raise RuntimeError(f"LM Studio konnte '{LOKALES_MODELL}' nicht laden: "
+                           f"{(ergebnis.stderr or ergebnis.stdout).strip()[-200:]}")
+
+
+def lokales_modell_vorbereiten() -> None:
+    try:
+        lokales_modell_laden()
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as fehler:
+        print(f"Lokales Modell: {fehler}", file=sys.stderr)
+        sprich("Das lokale Sprachmodell lässt sich nicht laden. Den Grund findest du in der Logdatei.")
 
 
 # ---------------------------------------------------------------- Ein- und Ausgabe
@@ -401,12 +474,41 @@ def warte_auf_wakeword() -> None:
             time.sleep(0.3)
         modell.reset()
         melde_status(f"Wartet auf „{name}“")
-        print(f"👂 Warte auf „{name}“ …")
+        print(f"👂 Warte auf „{name}“ (Mikrofon: {sd.query_devices(kind='input')['name']}) …")
+        protokoll = WakewordProtokoll()
         with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK) as strom:
             while not PAUSIERT.is_set():
-                block, _ = strom.read(BLOCK)
-                if max(modell.predict(block.flatten()).values()) >= WAKEWORD_SCHWELLE:
+                block, uebergelaufen = strom.read(BLOCK)
+                wert = max(modell.predict(block.flatten()).values())
+                protokoll.block(wert, uebergelaufen)
+                if wert >= WAKEWORD_SCHWELLE:
+                    print(f"✅ Erkannt ({wert:.2f})")
                     return
+
+
+class WakewordProtokoll:
+    """Schreibt knapp verfehlte Aktivierungen und verlorene Tonblöcke ins Log, um Aussetzer zu unterscheiden:
+    knapp verfehlt (Wert zwischen 0,2 und der Schwelle) oder gar nicht gehört (Ton verloren oder Wert 0)."""
+
+    KNAPP = 0.2
+
+    def __init__(self) -> None:
+        self.hoechster = 0.0  # höchster Wert des laufenden Anlaufs unter der Schwelle
+        self.verloren = 0
+        self.gemeldet = 0.0  # Zeitpunkt der letzten Meldung verlorener Blöcke
+
+    def block(self, wert: float, uebergelaufen: bool) -> None:
+        if wert >= self.KNAPP:
+            self.hoechster = max(self.hoechster, wert)
+        elif self.hoechster:  # Anlauf vorbei, ohne die Schwelle zu erreichen
+            if self.hoechster < WAKEWORD_SCHWELLE:
+                print(f"🤏 Knapp verfehlt ({self.hoechster:.2f}, Schwelle {WAKEWORD_SCHWELLE})")
+            self.hoechster = 0.0
+        if uebergelaufen:
+            self.verloren += 1
+            if time.time() - self.gemeldet > 60:  # höchstens einmal pro Minute
+                print(f"⚠️ Mikrofon: {self.verloren} Tonblöcke verloren (Rechner ausgelastet?)")
+                self.gemeldet = time.time()
 
 
 def lade_wakeword():
@@ -469,22 +571,77 @@ def nimm_auf_bis_stille(stille_sek: float = 0.7, max_warten_sek: float = 5.0, ma
     return np.concatenate(teile)
 
 
+def transcribe_bibliothek() -> str:
+    """libtranscribe: in der App unter Contents/Frameworks/transcribe, sonst von packaging/transcribe_bauen.sh."""
+    for ordner in (os.path.join(os.path.dirname(sys.executable), "..", "Frameworks", "transcribe"),
+                   os.path.join(ORDNER, "build", "transcribe")):
+        pfad = os.path.normpath(os.path.join(ordner, "libtranscribe.dylib"))
+        if os.path.exists(pfad):
+            return pfad
+    return ""
+
+
+_cohere = None  # (Modell, Sitzung); das Modell muss leben, solange die Sitzung genutzt wird
+
+
+def cohere_sitzung():
+    global _cohere
+    if _cohere is None:
+        bibliothek = transcribe_bibliothek()
+        if not bibliothek:
+            raise RuntimeError("transcribe.cpp fehlt, bitte packaging/transcribe_bauen.sh ausführen")
+        os.environ.setdefault("TRANSCRIBE_LIBRARY", bibliothek)
+        import transcribe_cpp
+        from huggingface_hub import hf_hub_download
+
+        modell = transcribe_cpp.Model(hf_hub_download(COHERE_REPO, COHERE_DATEI))  # liegt danach im HF-Cache
+        _cohere = (modell, modell.session())
+        atexit.register(spracherkennung_freigeben)
+    return _cohere[1]
+
+
+def spracherkennung_freigeben() -> None:
+    """Gibt Cohere-Sitzung und -Modell frei. Bleiben sie bis zum Prozessende offen, bricht ggml dort mit
+    einem Assert ab (gemessen). Die App ruft das beim Beenden auf, weil macOS dann Pythons atexit überspringt."""
+    global _cohere
+    if _cohere is not None:
+        modell, sitzung = _cohere
+        _cohere = None
+        sitzung.close()
+        modell.close()
+
+
 def transcribe(audio) -> str:
-    """Lokale Spracherkennung mit mlx-whisper auf der Grafikeinheit. Austauschbar gegen eine Cloud-API."""
-    import mlx_whisper
+    """Lokale Spracherkennung auf der Grafikeinheit: Cohere Transcribe oder mlx-whisper."""
+    import numpy as np
 
     if len(audio) < ABTASTRATE * 0.3:
         return ""
     melde_status("Denkt nach …")
+    if SPRACHERKENNUNG == "cohere":
+        return cohere_sitzung().run(np.asarray(audio, dtype=np.float32).ravel(), language="de").text.strip()
+    import mlx_whisper
+
     return mlx_whisper.transcribe(audio, path_or_hf_repo=WHISPER_MODELL, language="de")["text"].strip()
 
 
-def lade_whisper() -> None:
+def lade_spracherkennung() -> None:
+    """Lädt das Modell vorab. Fehlt Cohere Transcribe oder seine Bibliothek, bleibt Whisper als Rückfall."""
+    global SPRACHERKENNUNG
     import numpy as np
 
-    melde_status("Lade Spracherkennung (beim ersten Start etwa 500 MB) …")
-    print(f"Lade Whisper-Modell '{WHISPER_MODELL}' (beim ersten Mal wird es heruntergeladen) …")
-    transcribe(np.zeros(ABTASTRATE, dtype="float32"))  # mlx-whisper hält das Modell danach im Speicher
+    if SPRACHERKENNUNG == "cohere":
+        melde_status("Lade Spracherkennung (beim ersten Start etwa 1,8 GB) …")
+        print(f"Lade Cohere Transcribe '{COHERE_DATEI}' …")
+        try:
+            cohere_sitzung()
+        except Exception as fehler:  # fehlende Bibliothek, Download- oder Ladefehler: Atlas soll trotzdem hören
+            print(f"Cohere Transcribe nicht verfügbar ({fehler}), nehme Whisper.", file=sys.stderr)
+            SPRACHERKENNUNG = "whisper"
+    if SPRACHERKENNUNG != "cohere":
+        melde_status("Lade Spracherkennung (beim ersten Start etwa 500 MB) …")
+        print(f"Lade Whisper-Modell '{WHISPER_MODELL}' (beim ersten Mal wird es heruntergeladen) …")
+    transcribe(np.zeros(ABTASTRATE, dtype="float32"))  # wärmt die Grafikeinheit auf; das Modell bleibt im Speicher
 
 
 def hoere(direkt: bool = False, max_warten_sek: float = 5.0) -> str:
@@ -2834,6 +2991,21 @@ def schnellbefehl(text: str) -> Optional[str]:
 verlauf: list = []  # nur Text-Paare der letzten Runden, damit Rückfragen funktionieren
 
 
+def anfrage_parameter() -> dict:
+    if LOKALES_MODELL:
+        # LM Studio kennt weder die Websuche von Anthropic noch Fallbacks, Aufwand oder Cache-Angaben
+        return {"model": LOKALES_MODELL, "system": SYSTEMPROMPT_LOKAL, "tools": WERKZEUGE}
+    return {
+        "model": MODELL,
+        "system": SYSTEMPROMPT,
+        "output_config": {"effort": "low"},  # kurze Antworten, wenig Wartezeit
+        "betas": ["server-side-fallback-2026-07-01"],
+        "fallbacks": "default",
+        "cache_control": {"type": "ephemeral"},  # Werkzeuge und Systemprompt aus dem Cache: schneller, günstiger
+        "tools": WERKZEUGE + [WEBSUCHE],
+    }
+
+
 def ask(text: str) -> str:
     jetzt = datetime.now().strftime("%A, %d.%m.%Y, %H:%M Uhr")
     nachricht = {"role": "user", "content": f"[Jetzt: {jetzt}]\n{text}"}
@@ -2841,17 +3013,7 @@ def ask(text: str) -> str:
     # Eine lange Websuche kann mit pause_turn enden; der Python-Runner setzt das nicht selbst fort,
     # deshalb wird das Gespräch mitgeschrieben und der Runner mit dem pausierten Zug neu gestartet
     for _ in range(4):
-        runner = claude().beta.messages.tool_runner(
-            model=MODELL,
-            max_tokens=4000,
-            system=SYSTEMPROMPT,
-            output_config={"effort": "low"},  # kurze Antworten, wenig Wartezeit
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            cache_control={"type": "ephemeral"},  # Werkzeuge und Systemprompt aus dem Cache: schneller, günstiger
-            tools=WERKZEUGE + [WEBSUCHE],
-            messages=gespraech,
-        )
+        runner = claude().beta.messages.tool_runner(max_tokens=4000, messages=gespraech, **anfrage_parameter())
         letzte = None
         for letzte in runner:
             gespraech.append({"role": "assistant", "content": letzte.content})
@@ -2936,6 +3098,16 @@ def musik_laeuft() -> bool:
         return False
 
 
+def modelle_vorladen() -> None:
+    """Vorab laden, damit die erste Antwort nicht hängt."""
+    if not TEXTMODUS:
+        lade_spracherkennung()
+        if not STIMME.startswith(MACOS_PRAEFIX):
+            lade_stimme()
+    if LOKALES_MODELL:
+        lokales_modell_vorbereiten()
+
+
 def main() -> None:
     wecker_laden()
     if pmset_befehl():
@@ -2949,10 +3121,7 @@ def main() -> None:
     threading.Thread(target=uhr_schleife, daemon=True).start()
     if ANRUFE_ANNEHMEN:
         threading.Thread(target=anruf_ueberwachung, daemon=True).start()
-    if not TEXTMODUS:
-        lade_whisper()  # vorab laden, damit die erste Antwort nicht hängt
-        if not STIMME.startswith(MACOS_PRAEFIX):
-            lade_stimme()
+    modelle_vorladen()
     sprich("Ich bin bereit.")
     folgefrage = False
     while True:

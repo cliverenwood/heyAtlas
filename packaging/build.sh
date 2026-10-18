@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 
-VERSION=0.3.8
+VERSION=0.3.10
 BUILD=$(date +%Y%m%d%H%M)
 VENV=.venv312
 APP=build/heyAtlas.app
@@ -44,12 +44,22 @@ cp -R assets/icons/out/MenuBar $INHALT/Resources/app/assets/icons/out/
 cp assets/icons/out/HeyAtlas.icns $INHALT/Resources/
 $VENV/bin/python -m compileall -q $INHALT/Resources/app >/dev/null
 
+echo "▶ Cohere Transcribe"
+# Bibliotheken von packaging/transcribe_bauen.sh; ohne sie nimmt die App Whisper
+if [[ -f build/transcribe/libtranscribe.dylib ]]; then
+  mkdir -p $INHALT/Frameworks/transcribe && cp build/transcribe/*.dylib $INHALT/Frameworks/transcribe/
+else
+  echo "  fehlt (packaging/transcribe_bauen.sh ausführen), die App nutzt dann Whisper"
+fi
+
 echo "▶ Signatur (lokal, ohne Apple-Entwicklerkonto)"
 # Mit dem selbst erstellten Zertifikat "heyAtlas lokal" bleibt die Kennung über Neubauten gleich und macOS behält
 # erteilte Berechtigungen (Festplattenvollzugriff, Bedienungshilfen). Ohne Zertifikat: einfache lokale Signatur,
 # dann gelten Berechtigungen nach jedem Neubau nicht mehr. Zertifikat anlegen: siehe README, Abschnitt Signatur.
 if security find-identity -p codesigning | grep -q '"heyAtlas lokal"'; then IDENTITAET="heyAtlas lokal"; else IDENTITAET="-"; fi
 echo "  Identität: $IDENTITAET"
+# --deep erfasst lose Bibliotheken in Unterordnern von Frameworks nicht zuverlässig, deshalb vorher einzeln
+for bibliothek in $INHALT/Frameworks/transcribe/*.dylib(N); do codesign --force --sign "$IDENTITAET" $bibliothek; done
 codesign --force --deep --sign "$IDENTITAET" $APP
 codesign --verify --deep --strict $APP
 codesign -d -r- $APP 2>&1 | tail -1

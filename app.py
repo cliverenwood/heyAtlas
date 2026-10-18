@@ -29,6 +29,9 @@ import rumps  # noqa: E402
 
 import assistent as atlas  # noqa: E402
 
+# Beim Beenden über das Menü läuft Pythons atexit nicht; Cohere-Modell trotzdem sauber freigeben
+rumps.events.before_quit.register(atlas.spracherkennung_freigeben)
+
 ICONS = os.path.join(ORDNER, "assets", "icons", "out", "MenuBar")
 ICON_BEREIT = os.path.join(ICONS, "AtlasIdleTemplate.png")
 ICON_HOERT = os.path.join(ICONS, "AtlasListeningTemplate.png")
@@ -42,12 +45,23 @@ STIMMEN = {
     "Karlsson": "de_DE-karlsson-low",
     "Pavoque": "de_DE-pavoque-low",
 }
+def sprachmodelle() -> dict:
+    """Lokale Sprachmodelle aus LM Studio, die Werkzeuge aufrufen können, als {Anzeigename: Wert}."""
+    return {f"Lokal: {m['displayName']} ({m['sizeBytes'] / 1e9:.0f} GB)": atlas.LMSTUDIO_PRAEFIX + m["modelKey"]
+            for m in atlas.lmstudio_modelle()}
+
+
 AUSWAHLEN = {
     # Menütitel: (Einstellung, {Anzeigename: Wert})
-    "Claude-Modell": ("CLAUDE_MODELL", {
+    # Lokale Modelle aus LM Studio hängt sprachmodelle() beim Aufbau des Menüs an
+    "Sprachmodell": ("CLAUDE_MODELL", {
         "Claude Sonnet 5 (schnell)": "claude-sonnet-5",
         "Claude Opus 5 (gründlicher, langsamer)": "claude-opus-5",
         "Claude Haiku 4.5": "claude-haiku-4-5",
+    }),
+    "Spracherkennung": ("SPRACHERKENNUNG", {
+        "Cohere Transcribe (genauer, schneller)": "cohere",
+        "Whisper small": "whisper",
     }),
     "Aktivierungswort": ("WAKEWORD", {
         "Hey Jarvis": "hey_jarvis",
@@ -182,6 +196,8 @@ class AtlasApp(rumps.App):
         stimmen.add(rumps.MenuItem("Probehören", callback=lambda _: self.probehoeren(atlas.STIMME)))
         menue.add(stimmen)
         for titel, (name, werte) in AUSWAHLEN.items():
+            if name == "CLAUDE_MODELL":
+                werte = {**werte, **sprachmodelle()}
             untermenue = rumps.MenuItem(titel)
             aktuell = str(getattr(atlas, name.replace("CLAUDE_", "")))  # wirksamer Wert, auch der Standard
             for anzeige, wert in werte.items():

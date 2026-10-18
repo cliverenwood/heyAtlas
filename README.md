@@ -2,7 +2,7 @@
 
 Persönlicher Sprachassistent für macOS (Apple Silicon) mit Claude. Läuft lokal bis auf die Claude-Anfragen; später als Menüleisten-App in einer DMG.
 
-„Hey Atlas“ (bis das eigene Modell trainiert ist: „Hey Jarvis“) → Ton → sprechen → Pause → mlx-whisper (lokal) → Claude mit Werkzeugen → AppleScript → Piper
+„Hey Atlas“ (bis das eigene Modell trainiert ist: „Hey Jarvis“) → Ton → sprechen → Pause → Cohere Transcribe oder mlx-whisper (lokal) → Claude oder lokales Modell aus LM Studio mit Werkzeugen → AppleScript → Piper
 
 ## Einrichten
 
@@ -11,6 +11,7 @@ brew install python@3.12
 /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv .venv312
 .venv312/bin/pip install -r requirements.txt rumps pyobjc-framework-ServiceManagement
 security add-generic-password -s anthropic-api-key -a "$USER" -w   # fragt den Schlüssel verdeckt ab
+brew install cmake && packaging/transcribe_bauen.sh                 # Spracherkennung Cohere Transcribe (optional)
 ```
 
 Der Assistent liest den Schlüssel aus dem macOS-Schlüsselbund. Ist `ANTHROPIC_API_KEY` gesetzt, hat diese Variable Vorrang.
@@ -43,7 +44,36 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 | `KURZBEFEHL_ORDNER` | `Sprachassistent` | nur Kurzbefehle aus diesem Ordner sind erlaubt |
 | `WAKEWORD` | `hey_jarvis` | auch `alexa`, `hey_mycroft`, `hey_rhasspy` oder Pfad zu eigener `.onnx` |
 | `WAKEWORD_SCHWELLE` | `0.5` | höher = weniger Fehlauslösungen, niedriger = reagiert leichter |
+| `SPRACHERKENNUNG` | `cohere` | `cohere` = Cohere Transcribe, `whisper` = mlx-whisper; ohne transcribe.cpp automatisch Whisper |
 | `WHISPER_MODELL` | `mlx-community/whisper-small-mlx` | `mlx-community/whisper-large-v3-turbo` = genauer, ~1 s langsamer |
+| `COHERE_DATEI` | `cohere-transcribe-03-2026-Q5_K_M.gguf` | Quantisierung aus `handy-computer/cohere-transcribe-03-2026-gguf` |
+| `LMSTUDIO_URL` | `http://localhost:1234` | Adresse des LM-Studio-Servers für lokale Modelle |
+
+## Spracherkennung: Cohere Transcribe
+
+[Cohere Transcribe](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf) (2B Parameter, Apache-2.0)
+läuft über [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) (MIT) auf der Grafikeinheit; es ist
+dieselbe Modelldatei wie in der App Handy, liegt sie schon im Hugging-Face-Cache, wird nichts geladen (sonst ~1,8 GB).
+`packaging/transcribe_bauen.sh` baut die Bibliothek nach `build/transcribe/` und installiert die Python-Anbindung;
+`build.sh` nimmt sie in die App auf. Gemessen an 16 deutschen Sprachbefehlen (macOS-Stimmen Anna und Eddy):
+
+| | Wortfehler | Dauer je Satz | Speicher |
+|---|---|---|---|
+| Cohere Transcribe Q5_K_M | 34 % (Anna: 3 Fehler) | 0,18 s, höchstens 0,23 s | ~1,9 GB |
+| Whisper small | 57 % (Anna: 8 Fehler) | 0,58 s, Ausreißer bis 3,5 s | ~0,9 GB |
+
+## Lokales Sprachmodell (LM Studio)
+
+Statt Claude kann ein Modell aus [LM Studio](https://lmstudio.ai) antworten: Menü → Einstellungen → Sprachmodell
+listet alle dort geladenen Modelle, die Werkzeuge aufrufen können. Atlas startet den LM-Studio-Server selbst
+(`lms server start`) und lädt das Modell mit 32k Kontext. LM Studio spricht dieselbe Schnittstelle wie Claude, alle
+Werkzeuge funktionieren; nur die Websuche fehlt. Gemessen mit Systemprompt und allen Werkzeugen (M5 Pro):
+
+| Modell | Antwortzeit | Ergebnis |
+|---|---|---|
+| Qwen3.6 35B A3B (20 GB) | 2–3 s, erste Frage 8 s | richtig, empfohlen |
+| Qwen3.8 27B (19 GB) | 3–9 s, erste Frage 47 s | richtig, zu langsam |
+| Qwen3 4B Instruct (2 GB) | unter 1 s | erfindet Ergebnisse statt Werkzeuge zu nutzen, ungeeignet |
 
 ## Werkzeuge
 
@@ -147,7 +177,7 @@ packaging/build.sh          # baut build/heyAtlas.app und build/heyAtlas-<Versio
   Sie läuft deshalb nur auf Macs mit diesem Python.
 - Lokal signiert, ohne Apple-Entwicklerkonto: beim ersten Öffnen Rechtsklick → Öffnen. Nach einem Neubau kann
   macOS die Berechtigungen erneut abfragen.
-- Whisper-Modell und Stimme lädt die App beim ersten Start herunter.
+- Spracherkennungsmodell und Stimme lädt die App beim ersten Start herunter.
 
 ## Berechtigungen
 
