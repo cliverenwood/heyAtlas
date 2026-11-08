@@ -41,6 +41,7 @@ mkdir -p stimmen && cd stimmen && ../.venv312/bin/python -m piper.download_voice
 | `HEIMATORT` | leer | Ort für Wetterfragen ohne Ortsangabe, z. B. `Hamburg` |
 | `ANTHROPIC_WORKSPACE_ID` | leer | nur für API-Schlüssel ohne Workspace (Console → Settings → Workspaces) |
 | `NACHFRAGE_SEK` | `4` | so lange hört er nach einer Antwort ohne Wake-Word weiter, `0` = aus |
+| `SPRECHPAUSE_SEK` | `1.2` | so lange Stille beendet die Aufnahme; kleiner = schneller, aber Nachdenkpausen schneiden ab |
 | `KURZBEFEHL_ORDNER` | `Sprachassistent` | nur Kurzbefehle aus diesem Ordner sind erlaubt |
 | `WAKEWORD` | `hey_jarvis` | auch `alexa`, `hey_mycroft`, `hey_rhasspy` oder Pfad zu eigener `.onnx` |
 | `WAKEWORD_SCHWELLE` | `0.5` | höher = weniger Fehlauslösungen, niedriger = reagiert leichter |
@@ -96,7 +97,7 @@ Werkzeuge funktionieren; nur die Websuche fehlt. Gemessen mit Systemprompt und a
 - `lautstaerke`, `app_oeffnen`, `app_beenden`, `dunkelmodus`, `bildschirm_sperren`: Mac-Steuerung
 - `apple_music_abspielen`, `apple_music_steuern`: eigene Mediathek in der Musik-App (Streaming-Katalog ist per AppleScript nicht erreichbar)
 - `youtube_abspielen`, `youtube_steuern`: Suche über die YouTube Data API, Wiedergabe im Browser
-- `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Weckern, Nachrichten und ungelesenen Mails (nur Anzahl und Betreffs)
+- `nachrichten`: Schlagzeilen der Tagesschau; „Guten Morgen“ liefert ein Briefing aus Wetter, Terminen, Erinnerungen (heute oder früher fällige mit Namen, übrige als Anzahl), Weckern, Nachrichten und ungelesenen Mails (nur Anzahl und Betreffs)
 - Websuche: Claudes eingebaute Websuche für aktuelle Fragen
 - `abfahrten`, `verbindung_suchen`: Bus und Bahn mit Echtzeit über [Transitous](https://transitous.org) ([Datenquellen](https://transitous.org/sources/)); Heimathaltestelle und Kontaktangabe in den Einstellungen. Die Nutzung ist mit dem Transitous-Team abgestimmt (Oktober 2026).
 - `wetter`: aktuelles Wetter und bis zu 7 Tage Vorhersage von Open-Meteo (kostenlos, ohne Schlüssel)
@@ -172,7 +173,11 @@ packaging/build.sh          # baut build/heyAtlas.app und build/heyAtlas-<Versio
 
 - Menüleisten-App (`app.py`) mit Status, Pause und Einstellungen; die Einstellungen landen in
   `~/Library/Application Support/heyAtlas/einstellungen.json`, Schlüssel im Schlüsselbund, Ausgaben in
-  `~/Library/Logs/heyAtlas.log`.
+  `~/Library/Logs/heyAtlas.log`. Zur Fehlersuche liegt die jeweils letzte Aufnahme nach dem Wake-Word in
+  `~/Library/Application Support/heyAtlas/letzte-aufnahme.wav` (wird jedes Mal überschrieben, verlässt den Mac nicht).
+- Telefonate: Solange ein anderes Programm das Mikrofon nutzt (FaceTime, iPhone-Anruf über den Mac, Zoom,
+  WhatsApp, Diktat-Apps …), hört Atlas nicht mit; 3 s nach dem Gespräch wieder. Braucht macOS 14 oder neuer.
+  Gespräche, die nur am iPhone laufen, erkennt der Mac nicht.
 - Die App enthält ihre Python-Pakete, nutzt aber das Homebrew-Python dieses Macs (`/opt/homebrew/opt/python@3.12`).
   Sie läuft deshalb nur auf Macs mit diesem Python.
 - Lokal signiert, ohne Apple-Entwicklerkonto: beim ersten Öffnen Rechtsklick → Öffnen. Nach einem Neubau kann

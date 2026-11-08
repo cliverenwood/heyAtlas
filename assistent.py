@@ -10,6 +10,8 @@ Start:  python3 assistent.py          (Wake-Word, Aufnahme endet bei einer Sprec
 
 import atexit
 import base64
+import collections
+import ctypes
 import getpass
 import json
 import os
@@ -89,6 +91,8 @@ WAKEWORD_SCHWELLE = float(einstellung("WAKEWORD_SCHWELLE", "0.5"))
 BLOCK = 1280  # 80 ms bei 16 kHz, die Blockgröße, die openWakeWord erwartet
 # So lange hört der Assistent nach einer Antwort ohne Wake-Word weiter zu; 0 schaltet Folgefragen ab
 NACHFRAGE_SEK = float(einstellung("NACHFRAGE_SEK", "4"))
+# So lange Stille beendet die Aufnahme. 0,7 s schnitt Sätze beim Nachdenken ab ("Erstelle einen Termin für", Log)
+SPRECHPAUSE_SEK = float(einstellung("SPRECHPAUSE_SEK", "1.2"))
 # Optionale Funktionen mit weitreichenden Berechtigungen, standardmäßig aus (Schalter im Einstellungsmenü)
 NACHRICHTEN_LESEN = einstellung("NACHRICHTEN_LESEN", "") in ("1", "True", "true")  # braucht Festplattenvollzugriff
 ANRUFE_ANNEHMEN = einstellung("ANRUFE_ANNEHMEN", "") in ("1", "True", "true")  # braucht Bedienungshilfen
@@ -114,7 +118,8 @@ wieder; das ist die Ausnahme von der Regel mit den kurzen Antworten.
 Für Bus und Bahn nutze abfahrten und verbindung_suchen; nenne Abfahrtszeiten natürlich und Verspätungen nur,
 wenn es welche gibt.
 Sagt der Nutzer "Guten Morgen" oder bittet um ein Briefing, hole parallel das Wetter, die Termine von heute, die
-Wecker, die Nachrichten und die ungelesenen Mails und fasse alles in vier bis fünf Sätzen zusammen: Nachrichten nur
+offenen Erinnerungen, die Wecker, die Nachrichten und die ungelesenen Mails und fasse alles in fünf bis sechs Sätzen
+zusammen: Erinnerungen, die heute oder früher fällig sind, mit Namen, alle übrigen nur als Anzahl; Nachrichten nur
 mit den zwei wichtigsten Schlagzeilen, Mails in einem einzigen Satz mit ihrer Anzahl und knapp den Betreffs der
 höchstens drei neuesten, ohne Inhalte."""
 
@@ -318,7 +323,57 @@ def vorlesen(text: str, name: Optional[str] = None) -> None:
             # Text über stdin, damit er nie als Option von say gelesen wird
             subprocess.run(["/usr/bin/say", "-v", name.removeprefix(MACOS_PRAEFIX), "-f", "-"], input=text, text=True)
         else:
-            _piper_vorlesen(text, lade_stimme(None if name == STIMME else name))
+            _piper_vorlesen(sprechtext(text), lade_stimme(None if name == STIMME else name))
+
+
+MONATE = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober",
+          "November", "Dezember")
+_ZAHLWORTE = ("", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf", "zwölf",
+              "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn")
+
+
+def ordnungszahl(zahl: int, endung: str = "en") -> str:
+    """1 bis 31 als Ordnungszahl: ersten, neunten, zwanzigsten (endung "e" für "der neunte")."""
+    if zahl < 20:
+        stamm = {1: "erst", 3: "dritt", 7: "siebt", 8: "acht"}.get(zahl, f"{_ZAHLWORTE[zahl]}t")
+    else:
+        zehner = "zwanzig" if zahl < 30 else "dreißig"
+        stamm = (f"{_ZAHLWORTE[zahl % 10]}und" if zahl % 10 else "") + zehner + "st"
+    return stamm + endung
+
+
+def sprechtext(text: str) -> str:
+    """Schreibt Daten und Uhrzeiten so um, dass Piper sie richtig ausspricht. Piper (espeak) liest sonst
+    "am 09.11. um 20:00 Uhr" als "null neun Punkt elfte um zwanzig Uhr null null Uhr" und "5. Februar" als
+    "fünf Februar" (nachgemessen mit phonemize)."""
+    def datum(treffer) -> str:
+        tag, monat = int(treffer["tag"]), treffer["monat"]
+        if monat.isdigit():
+            if not (1 <= tag <= 31 and 1 <= int(monat) <= 12):
+                return treffer[0]
+            monat = MONATE[int(monat) - 1]
+        endung = "e" if (treffer["vorher"] or "").lower() == "der " else "en"
+        jahr = f" {treffer['jahr']}" if treffer["jahr"] else ""
+        return f"{treffer['vorher'] or ''}{ordnungszahl(tag, endung)} {monat}{jahr}"
+
+    def uhrzeit(treffer) -> str:
+        stunde, minute = int(treffer[1]), int(treffer[2])
+        return f"{stunde} Uhr" + (f" {minute}" if minute else "")
+
+    text = re.sub(r"\b(\d{1,2}):(\d{2})(?: Uhr)?\b", uhrzeit, text)
+    monate = "|".join(MONATE)
+    return re.sub(rf"(?P<vorher>\b[Dd]er )?\b(?P<tag>\d{{1,2}})\.(?: ?(?P<monat>{monate})|(?P<monat2>\d{{1,2}})\.)"
+                  r"(?: ?(?P<jahr>\d{4})\b)?",
+                  lambda t: datum(_DatumTreffer(t)), text)
+
+
+class _DatumTreffer(dict):
+    """Fasst die beiden Schreibweisen des Monats (Name oder Zahl) unter "monat" zusammen."""
+
+    def __init__(self, treffer) -> None:
+        super().__init__(treffer.groupdict())
+        self["monat"] = self["monat"] or self.pop("monat2")
+        self[0] = treffer[0]
 
 
 def _piper_vorlesen(text: str, stimme) -> None:
@@ -443,7 +498,22 @@ def wiedergabe_anhalten_abwarten() -> None:
 
 
 def ton(name: str) -> None:
+    """Spielt einen Systemton und wartet, bis er fertig ist (für das Klingeln mit mehreren Tönen)."""
     subprocess.run(["/usr/bin/afplay", f"/System/Library/Sounds/{name}.aiff"])
+
+
+def signalton(name: str) -> None:
+    """Spielt einen Systemton, ohne zu warten. afplay braucht unter macOS 27 für den 0,56 s langen Tink-Ton
+    1,4 s (gemessen); so lange wäre Atlas nach dem Wake-Word taub. NSSound startet in rund 0,1 s."""
+    try:
+        from AppKit import NSSound
+
+        klang = NSSound.soundNamed_(name)
+        if klang is not None and klang.play():
+            return
+    except ImportError:
+        pass
+    subprocess.Popen(["/usr/bin/afplay", f"/System/Library/Sounds/{name}.aiff"])
 
 
 def nimm_auf():
@@ -462,28 +532,37 @@ def nimm_auf():
 _wakeword = None
 
 
-def warte_auf_wakeword() -> None:
-    """Hört lokal mit, bis das Wake-Word erkannt wird. Bis dahin verlässt kein Audio den Mac."""
+def warte_auf_wakeword():
+    """Hört lokal mit, bis das Wake-Word erkannt wird. Bis dahin verlässt kein Audio den Mac.
+    Gibt den weiterhin offenen Mikrofonstrom und den Ruhepegel zurück: Die Aufnahme liest direkt daraus
+    weiter, damit nichts verloren geht, was direkt nach "Hey Atlas" gesagt wird. Der Aufrufer schließt ihn."""
     import sounddevice as sd
 
     modell = lade_wakeword()
     name = os.path.basename(WAKEWORD).removesuffix(".onnx")
     while True:
-        while PAUSIERT.is_set():  # pausiert: Mikrofon bleibt zu
-            melde_status("Pausiert")
+        while PAUSIERT.is_set() or TELEFONAT.is_set():  # pausiert: Mikrofon bleibt zu
+            if PAUSIERT.is_set():
+                melde_status("Pausiert")  # während eines Telefonats setzt telefonat_ueberwachung den Status
             time.sleep(0.3)
         modell.reset()
         melde_status(f"Wartet auf „{name}“")
         print(f"👂 Warte auf „{name}“ (Mikrofon: {sd.query_devices(kind='input')['name']}) …")
         protokoll = WakewordProtokoll()
-        with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK) as strom:
-            while not PAUSIERT.is_set():
+        strom = sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK)
+        strom.start()
+        try:
+            while not (PAUSIERT.is_set() or TELEFONAT.is_set()):
                 block, uebergelaufen = strom.read(BLOCK)
                 wert = max(modell.predict(block.flatten()).values())
-                protokoll.block(wert, uebergelaufen)
+                protokoll.block(wert, uebergelaufen, block)
                 if wert >= WAKEWORD_SCHWELLE:
                     print(f"✅ Erkannt ({wert:.2f})")
-                    return
+                    return strom, protokoll.ruhepegel()
+        except BaseException:
+            strom.close()
+            raise
+        strom.close()
 
 
 class WakewordProtokoll:
@@ -496,8 +575,14 @@ class WakewordProtokoll:
         self.hoechster = 0.0  # höchster Wert des laufenden Anlaufs unter der Schwelle
         self.verloren = 0
         self.gemeldet = 0.0  # Zeitpunkt der letzten Meldung verlorener Blöcke
+        self.pegel = collections.deque(maxlen=25)  # Lautstärke der letzten 2 s, für den Ruhepegel
 
-    def block(self, wert: float, uebergelaufen: bool) -> None:
+    def ruhepegel(self) -> float:
+        """Leisester Block der letzten 2 s (als float32-Effektivwert): auch mitten im "Hey Atlas" gibt es Pausen."""
+        return min(self.pegel) if self.pegel else 0.0
+
+    def block(self, wert: float, uebergelaufen: bool, block) -> None:
+        self.pegel.append(effektivwert(block))
         if wert >= self.KNAPP:
             self.hoechster = max(self.hoechster, wert)
         elif self.hoechster:  # Anlauf vorbei, ohne die Schwelle zu erreichen
@@ -533,42 +618,100 @@ def lade_wakeword():
 _aufnahme_lief_voll = False
 
 
-def nimm_auf_bis_stille(stille_sek: float = 0.7, max_warten_sek: float = 5.0, max_sek: float = 20.0):
-    """Signalton, dann Aufnahme bis zu einer Sprechpause. Gibt float32-Audio mit 16 kHz zurück."""
-    global _aufnahme_lief_voll
+def effektivwert(block) -> float:
+    """Effektivwert (RMS) eines int16-Blocks, skaliert wie float32-Audio (1.0 = Vollaussteuerung)."""
+    import numpy as np
+
+    return float(np.sqrt(np.mean((block.astype(np.float32) / 32768) ** 2)))
+
+
+SIGNALTON_SEK = 0.6  # so lange zählt Lautes nicht als Sprechbeginn: das Mikrofon hört den Signalton mit
+MINDESTPEGEL = 0.005  # -46 dBFS; das reSpeaker am Mac mini liefert Sprache bei -20 bis -30 dBFS (gemessen)
+
+
+def nimm_auf_bis_stille(stille_sek: float = SPRECHPAUSE_SEK, max_warten_sek: float = 5.0, max_sek: float = 20.0,
+                        strom=None, ruhe: Optional[float] = None):
+    """Signalton, dann Aufnahme bis zu einer Sprechpause. Gibt float32-Audio mit 16 kHz zurück.
+    strom: offener int16-Strom aus warte_auf_wakeword (sonst wird ein eigener geöffnet), ruhe: dessen Ruhepegel."""
     import numpy as np
     import sounddevice as sd
 
-    ton("Tink")
+    eigener = strom is None
+    if eigener:
+        strom = sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="int16", blocksize=BLOCK)
+        strom.start()
+    signalton("Tink")  # erst nach dem Öffnen und ohne zu warten: die Aufnahme läuft schon
     melde_status("Hört zu", hoert=True)
     print("🎙  Ich höre …")
-    teile, pegel = [], []
-    schwelle, gesprochen, still = None, False, 0.0
-    dauer = BLOCK / ABTASTRATE
-    with sd.InputStream(samplerate=ABTASTRATE, channels=1, dtype="float32", blocksize=BLOCK) as strom:
-        while len(teile) * dauer < max_sek:
+    try:
+        teile, schwelle = _aufnehmen(strom, stille_sek, max_warten_sek, max_sek, ruhe)
+    finally:
+        if eigener:
+            strom.close()
+    audio = np.concatenate(teile).astype(np.float32) / 32768 if teile else np.zeros(0, dtype="float32")
+    aufnahme_merken(audio, schwelle)
+    if not _gesprochen:
+        return np.zeros(0, dtype="float32")
+    signalton("Pop")
+    return audio
+
+
+_gesprochen = False  # hat die letzte Aufnahme Sprache enthalten?
+
+
+def _aufnehmen(strom, stille_sek: float, max_warten_sek: float, max_sek: float, ruhe: Optional[float]):
+    """Liest Blöcke bis zur Sprechpause. Gibt die int16-Blöcke und die verwendete Sprachschwelle zurück."""
+    global _aufnahme_lief_voll, _gesprochen
+    teile = []
+    if ruhe is None:
+        # Grundrauschen ohne Wake-Word-Vorlauf: leisester der ersten 10 Blöcke, robust gegen Ton und Sprechen
+        for _ in range(10):
             block, _ = strom.read(BLOCK)
             teile.append(block.flatten())
-            rms = float(np.sqrt(np.mean(block ** 2)))
-            if schwelle is None:
-                # Grundrauschen aus den ersten 5 Blöcken, das Minimum ist robust gegen frühes Sprechen
-                pegel.append(rms)
-                if len(pegel) == 5:
-                    schwelle = max(0.01, 3 * min(pegel))
-                continue
-            if rms > schwelle:
-                gesprochen, still = True, 0.0
-            else:
-                still += dauer
-            if gesprochen and still >= stille_sek:
-                _aufnahme_lief_voll = False
-                break
-            if not gesprochen and len(teile) * dauer > max_warten_sek:
-                _aufnahme_lief_voll = False
-                return np.zeros(0, dtype="float32")
-    _aufnahme_lief_voll = True  # keine Sprechpause: durchgehendes Geräusch, kein Befehl
-    ton("Pop")
-    return np.concatenate(teile)
+        ruhe = min(effektivwert(t) for t in teile)
+    schwelle = max(MINDESTPEGEL, 3 * ruhe)
+    gesprochen, still = False, 0.0
+    dauer = BLOCK / ABTASTRATE
+    _aufnahme_lief_voll = True  # keine Sprechpause bis max_sek: durchgehendes Geräusch, kein Befehl
+    while len(teile) * dauer < max_sek:
+        block, _ = strom.read(BLOCK)
+        teile.append(block.flatten())
+        if effektivwert(block) > schwelle and len(teile) * dauer > SIGNALTON_SEK:
+            gesprochen, still = True, 0.0
+        else:
+            still += dauer
+        if gesprochen and still >= stille_sek:
+            _aufnahme_lief_voll = False
+            break
+        if not gesprochen and len(teile) * dauer > max_warten_sek:
+            _aufnahme_lief_voll = False
+            break
+    _gesprochen = gesprochen
+    return teile, schwelle
+
+
+def aufnahme_merken(audio, schwelle: float) -> None:
+    """Hält die letzte Aufnahme zur Fehlersuche fest (überschreibt sie jedes Mal) und loggt ihre Pegel."""
+    import wave
+
+    import numpy as np
+
+    if not len(audio):
+        return
+    bloecke = [audio[i:i + BLOCK] for i in range(0, len(audio) - BLOCK + 1, BLOCK)] or [audio]
+    lautester = max(float(np.sqrt(np.mean(b ** 2))) for b in bloecke)
+    print(f"🎚  Aufnahme {len(audio) / ABTASTRATE:.1f} s, Sprachschwelle {20 * np.log10(schwelle):.0f} dBFS, "
+          f"lautester Block {20 * np.log10(lautester + 1e-9):.0f} dBFS, "
+          f"{'mit' if _gesprochen else 'ohne'} Sprache")
+    try:
+        os.makedirs(DATENORDNER, exist_ok=True)
+        with wave.open(os.path.join(DATENORDNER, "letzte-aufnahme.wav"), "wb") as datei:
+            datei.setnchannels(1)
+            datei.setsampwidth(2)
+            datei.setframerate(ABTASTRATE)
+            datei.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+    except OSError as fehler:
+        print(f"Aufnahme nicht gespeichert: {fehler}", file=sys.stderr)
 
 
 def transcribe_bibliothek() -> str:
@@ -651,14 +794,19 @@ def hoere(direkt: bool = False, max_warten_sek: float = 5.0) -> str:
     if MODUS == "ptt":
         audio = nimm_auf()
     else:
-        if not direkt:
-            warte_auf_wakeword()
-            # Klingelt gerade ein Wecker oder Timer, reicht "Hey Atlas" zum Ausschalten, ohne Umweg über Claude
-            if klingeln_beenden():
-                sprich("Okay, ist aus.")
-                return ""
-            wiedergabe_anhalten_starten()  # im Hintergrund: der Signalton darf nicht auf das Anhalten warten
-        audio = nimm_auf_bis_stille(max_warten_sek=max_warten_sek)
+        if direkt:
+            audio = nimm_auf_bis_stille(max_warten_sek=max_warten_sek)
+        else:
+            strom, ruhe = warte_auf_wakeword()
+            try:
+                # Klingelt gerade ein Wecker oder Timer, reicht "Hey Atlas" zum Ausschalten, ohne Umweg über Claude
+                if klingeln_beenden():
+                    sprich("Okay, ist aus.")
+                    return ""
+                wiedergabe_anhalten_starten()  # im Hintergrund: der Signalton darf nicht auf das Anhalten warten
+                audio = nimm_auf_bis_stille(max_warten_sek=max_warten_sek, strom=strom, ruhe=ruhe)
+            finally:
+                strom.close()
     text = transcribe(audio)
     print(f"📝 {text}")
     return text
@@ -2284,6 +2432,76 @@ def berechtigungen_einrichten() -> list:
     return ergebnisse
 
 
+# ---------------------------------------------------------------- Telefonate erkennen
+
+# Nutzt ein anderes Programm das Mikrofon (FaceTime, iPhone-Anruf über den Mac, Zoom, WhatsApp …), pausiert Atlas,
+# bis es wieder frei ist. Fragt Core Audio, welche Prozesse gerade aufnehmen (ab macOS 14, ohne Berechtigung).
+TELEFONAT = threading.Event()  # gesetzt: ein anderes Programm nimmt auf, Atlas hört nicht mit
+TELEFONAT_NACHLAUF_SEK = 3  # so lange muss das Mikrofon frei sein, bevor Atlas wieder zuhört
+
+
+def _vierzeichen(kennung: str) -> int:
+    return int.from_bytes(kennung.encode(), "big")
+
+
+class _AudioAdresse(ctypes.Structure):
+    _fields_ = [("auswahl", ctypes.c_uint32), ("bereich", ctypes.c_uint32), ("element", ctypes.c_uint32)]
+
+
+_coreaudio = None
+
+
+def _audio_eigenschaft(objekt: int, auswahl: str, typ) -> list:
+    """Liest eine globale Core-Audio-Eigenschaft als Liste von typ-Werten."""
+    global _coreaudio
+    if _coreaudio is None:
+        _coreaudio = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+    adresse = _AudioAdresse(_vierzeichen(auswahl), _vierzeichen("glob"), 0)
+    groesse = ctypes.c_uint32(0)
+    if _coreaudio.AudioObjectGetPropertyDataSize(objekt, ctypes.byref(adresse), 0, None, ctypes.byref(groesse)):
+        raise RuntimeError(f"Core Audio kennt '{auswahl}' nicht (erst ab macOS 14)")
+    werte = (typ * (groesse.value // ctypes.sizeof(typ)))()
+    if _coreaudio.AudioObjectGetPropertyData(objekt, ctypes.byref(adresse), 0, None, ctypes.byref(groesse), werte):
+        raise RuntimeError(f"Core Audio: '{auswahl}' nicht lesbar")
+    return list(werte)
+
+
+def mikrofon_nutzer() -> list:
+    """Bundle-Kennungen (sonst Prozessnummern) aller anderen Prozesse, die gerade vom Mikrofon aufnehmen."""
+    from AppKit import NSRunningApplication
+
+    nutzer = []
+    for prozess in _audio_eigenschaft(1, "prs#", ctypes.c_uint32):  # 1 = Systemobjekt
+        pid = _audio_eigenschaft(prozess, "ppid", ctypes.c_int32)[0]
+        if pid == os.getpid() or not _audio_eigenschaft(prozess, "piri", ctypes.c_uint32)[0]:
+            continue
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        nutzer.append(str(app.localizedName()) if app and app.localizedName() else f"Prozess {pid}")
+    return nutzer
+
+
+def telefonat_ueberwachung() -> None:
+    frei_seit = 0.0
+    while True:
+        try:
+            nutzer = mikrofon_nutzer()
+        except Exception as fehler:  # ältere macOS-Version: Atlas läuft dann ohne diese Pause weiter
+            print(f"Telefonat-Erkennung aus: {fehler}", file=sys.stderr)
+            return
+        if nutzer:
+            frei_seit = 0.0
+            if not TELEFONAT.is_set():
+                print(f"📞 Mikrofon in Benutzung ({', '.join(nutzer)}), Atlas pausiert")
+                TELEFONAT.set()
+            melde_status(f"Pausiert: {', '.join(nutzer)} nutzt das Mikrofon")
+        elif TELEFONAT.is_set():
+            frei_seit = frei_seit or time.time()
+            if time.time() - frei_seit >= TELEFONAT_NACHLAUF_SEK:
+                print("📞 Mikrofon wieder frei, höre wieder zu")
+                TELEFONAT.clear()
+        time.sleep(1)
+
+
 # ---------------------------------------------------------------- Anrufe annehmen (optional)
 
 # Atlas bedient die Anrufanzeige von macOS per Bedienungshilfen, wie ein Klick. Apple bietet dafür keine Schnittstelle;
@@ -3119,6 +3337,8 @@ def main() -> None:
             print()
         return
     threading.Thread(target=uhr_schleife, daemon=True).start()
+    if MODUS == "wake":
+        threading.Thread(target=telefonat_ueberwachung, daemon=True).start()
     if ANRUFE_ANNEHMEN:
         threading.Thread(target=anruf_ueberwachung, daemon=True).start()
     modelle_vorladen()
